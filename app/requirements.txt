@@ -1,0 +1,15 @@
+# Data Processing
+pandas==2.1.4
+numpy==1.26.3
+
+# Database
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.25
+
+# Environment Management
+python-dotenv==1.0.0
+
+# Optional: For enhanced data validation
+scipy==1.11.4
+PyYAML
+requests
