@@ -15,7 +15,7 @@ The integrated dataset contains the following columns:
 - **stock_ticker**: Stock symbol representing the traded security (e.g., AAPL, GOOGL).
 - **transaction_type**: Type of transaction (e.g., BUY, SELL).
 - **quantity**: Number of shares traded in the transaction.
-- **average_trade_size**: Average number of shares typically traded for this stock.
+- **average_trade_size**: Average number of shares typically traded by this customer
 - **stock_price**: Price per share at the time of transaction.
 - **total_trade_amount**: Total monetary value of the transaction calculated as stock_price × quantity.
 - **customer_account_type**: Type of customer account (e.g., Individual, Corporate, Institutional).
