@@ -1,3 +1,3 @@
 Column_Name,Original_Value,Encoded_Value
-is_holiday,False,False
-is_holiday,True,True
+is_holiday,0,0
+is_holiday,1,1
