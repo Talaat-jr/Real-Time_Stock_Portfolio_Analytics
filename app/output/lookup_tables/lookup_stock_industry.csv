@@ -1,0 +1,9 @@
+Column_Name,Original_Value,Encoded_Value
+stock_industry,Asset Management,0
+stock_industry,Hardware,1
+stock_industry,Oil & Gas,2
+stock_industry,Pharmaceuticals,3
+stock_industry,Renewables,4
+stock_industry,Retail,5
+stock_industry,Software,6
+stock_industry,Utilities,7

@@ -1,0 +1,6 @@
+Column_Name,Original_Value,Encoded_Value
+day_name,Friday,0
+day_name,Monday,1
+day_name,Thursday,2
+day_name,Tuesday,3
+day_name,Wednesday,4

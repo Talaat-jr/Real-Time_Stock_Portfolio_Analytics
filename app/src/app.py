@@ -1,7 +1,14 @@
+"""
+Stock Portfolio Data Pipeline - Milestone 2
+Handles data loading, cleaning, encoding, integration, and streaming.
+"""
 import pandas as pd
 import numpy as np
 import os
+import json
 from db_utils import save_to_db, initialize_database
+from kafka_utils import create_consumer, consume_and_process, wait_for_kafka
+from encoding_utils import encode_data, save_lookup_tables
 import logging
 import time
 
@@ -19,6 +26,10 @@ trades_df = None
 daily_trade_prices_df = None
 dim_date_df = None
 cleaned_daily_trade_prices_df = None
+
+# Global lookup tables
+LOOKUP_TABLES = {}
+
 
 def read_file(file_path):
     """
@@ -149,117 +160,6 @@ def handle_missing_values(df, method='ffill'):
     
     return df_filled
 
-def impute_missing_values_from_portfolio(df1, df2):
-    cleaned_daily_trade_prices_df = df1.copy()
-    trades_df_with_stk_freq = df2.copy()
-
-    # Convert timestamp to datetime for proper sorting
-    trades_df_with_stk_freq['timestamp'] = pd.to_datetime(trades_df_with_stk_freq['timestamp'])
-
-    # Sort by customer_id and timestamp
-    trades_df_with_stk_freq = trades_df_with_stk_freq.sort_values(['customer_id', 'timestamp']).reset_index(drop=True)
-
-    # Initialize stk_freq column with empty dictionaries
-    trades_df_with_stk_freq['stk_freq'] = [dict() for _ in range(len(trades_df_with_stk_freq))]
-
-    # Group by customer_id and compute cumulative stock frequencies
-    for customer_id, group in trades_df_with_stk_freq.groupby('customer_id'):
-        # Get indices for this customer
-        indices = group.index.tolist()
-        
-        # Initialize portfolio for this customer
-        portfolio = {}
-        
-        # Loop through each transaction for this customer
-        for idx in indices:
-            stock_ticker = trades_df_with_stk_freq.loc[idx, 'stock_ticker']
-            transaction_type = trades_df_with_stk_freq.loc[idx, 'transaction_type']
-            quantity = trades_df_with_stk_freq.loc[idx, 'quantity']
-            
-            # Update portfolio based on transaction type
-            if transaction_type == 'BUY':
-                portfolio[stock_ticker] = portfolio.get(stock_ticker, 0) + quantity
-            elif transaction_type == 'SELL':
-                portfolio[stock_ticker] = portfolio.get(stock_ticker, 0) - quantity
-                # Remove stock from portfolio if quantity becomes 0
-                if portfolio[stock_ticker] <= 0:
-                    portfolio.pop(stock_ticker, None)
-            
-            # Store a copy of the current portfolio state
-            trades_df_with_stk_freq.at[idx, 'stk_freq'] = portfolio.copy()
-
-    # Display first few rows to verify
-    logger.info("Sample of trades_df with stk_freq column:")
-    logger.info(trades_df_with_stk_freq.head(10))
-
-    cleaned_daily_trade_prices_df = daily_trade_prices_df.copy()
-    cleaned_daily_trade_prices_df['date'] = pd.to_datetime(cleaned_daily_trade_prices_df['date'])
-
-    # Set date as index for easier lookup
-    cleaned_daily_trade_prices_df.set_index('date', inplace=True)
-
-    # Get stock ticker columns (all columns in daily_prices_df)
-    stock_columns = cleaned_daily_trade_prices_df.columns.tolist()
-
-
-    logger.info("Starting price inference from portfolio values...")
-    logger.info(f"Initial missing values: {cleaned_daily_trade_prices_df.isnull().sum().sum()}")
-
-    # Loop through each trade record
-    for idx, row in trades_df_with_stk_freq.iterrows():
-        # Get the portfolio state and cumulative value
-        portfolio = row['stk_freq']
-        cumulative_value = row['cumulative_portfolio_value']
-        trade_date = row['timestamp']
-        customer_id = row['customer_id']
-        
-        # Skip if portfolio is empty
-        if not portfolio:
-            continue
-        
-        # Check if date exists in daily_prices_df
-        if trade_date not in cleaned_daily_trade_prices_df.index:
-            continue
-        
-        # Get prices for this date
-        date_prices = cleaned_daily_trade_prices_df.loc[trade_date]
-        
-        # Count missing prices for stocks in portfolio
-        missing_stocks = []
-        known_stocks = []
-        
-        for stock in portfolio.keys():
-            if pd.isna(date_prices[stock]):
-                missing_stocks.append(stock)
-            else:
-                known_stocks.append(stock)
-        
-        # Only infer if exactly 1 stock price is missing
-        if len(missing_stocks) == 1:
-            missing_stock = missing_stocks[0]
-            
-            # Calculate the value of known stocks
-            known_value = sum(date_prices[stock] * portfolio[stock] for stock in known_stocks)
-            
-            # Infer the missing stock price
-            missing_quantity = portfolio[missing_stock]
-            if missing_quantity > 0:
-                inferred_price = (cumulative_value - known_value) / missing_quantity
-                
-                # Sanity check: price should be positive and reasonable
-                if inferred_price > 0 and inferred_price < 10000:  # Basic bounds check
-                    # Store the inferred price directly in the daily_prices_df
-                    cleaned_daily_trade_prices_df.at[trade_date, missing_stock] = inferred_price
-
-    # Reset index to have date as a column again
-    cleaned_daily_trade_prices_df.reset_index(inplace=True)
-
-    logger.info(f"\n{'='*60}")
-    logger.info("Missing values after inference:")
-    missing_counts = cleaned_daily_trade_prices_df.isnull().sum()
-    logger.info(missing_counts[missing_counts > 0])
-    logger.info(f"\nTotal remaining missing values: {cleaned_daily_trade_prices_df.isnull().sum().sum()}")
-    return cleaned_daily_trade_prices_df
 
 def integrate_data():
     """
@@ -343,6 +243,67 @@ def integrate_data():
     return merged_df
 
 
+def split_for_streaming(df, stream_percentage=0.05):
+    """
+    Split dataframe into training (95%) and streaming (5%) sets.
+    
+    Args:
+        df: DataFrame to split
+        stream_percentage: Percentage for streaming (default 0.05 = 5%)
+        
+    Returns:
+        tuple: (main_df, stream_df)
+    """
+    logger.info(f"Splitting data for streaming ({stream_percentage*100}% for stream)...")
+    
+    # Shuffle and split
+    df_shuffled = df.sample(frac=1, random_state=42).reset_index(drop=True)
+    split_idx = int(len(df_shuffled) * (1 - stream_percentage))
+    
+    main_df = df_shuffled[:split_idx].copy()
+    stream_df = df_shuffled[split_idx:].copy()
+    
+    logger.info(f"Main dataset: {len(main_df)} rows ({(1-stream_percentage)*100}%)")
+    logger.info(f"Stream dataset: {len(stream_df)} rows ({stream_percentage*100}%)")
+    
+    return main_df, stream_df
+
+
+def save_streaming_attributes(df):
+    """
+    Save statistical attributes from main dataset for stream processing.
+    Stores average stock prices per month and other useful metrics.
+    
+    Args:
+        df: Main dataframe (95% of data)
+    """
+    logger.info("Saving streaming attributes for imputation...")
+    
+    # Create output directory
+    os.makedirs('output/streaming_attributes', exist_ok=True)
+    
+    # Extract month and year from timestamp
+    df_temp = df.copy()
+    df_temp['year_month'] = pd.to_datetime(df_temp['timestamp']).dt.to_period('M')
+    
+    # Calculate average price per stock per month
+    avg_prices = df_temp.groupby(['year_month', 'stock_ticker'])['stock_price'].mean().reset_index()
+    avg_prices.columns = ['year_month', 'stock_ticker', 'avg_price']
+    avg_prices['year_month'] = avg_prices['year_month'].astype(str)
+    avg_prices.to_csv('output/streaming_attributes/avg_stock_prices_monthly.csv', index=False)
+    
+    # Calculate overall statistics per stock
+    stock_stats = df_temp.groupby('stock_ticker').agg({
+        'stock_price': ['mean', 'median', 'std'],
+        'quantity': ['mean', 'median'],
+        'total_trade_amount': ['mean', 'median']
+    }).reset_index()
+    stock_stats.columns = ['_'.join(col).strip('_') for col in stock_stats.columns]
+    stock_stats.to_csv('output/streaming_attributes/stock_statistics.csv', index=False)
+    
+    logger.info("Streaming attributes saved successfully")
+
+
 def save_sample_csv(df, output_path='output/sample_output.csv', n_rows=10):
     """
     Save a sample of the dataframe to CSV.
@@ -352,13 +313,9 @@ def save_sample_csv(df, output_path='output/sample_output.csv', n_rows=10):
         output_path: Path to save CSV
         n_rows: Number of rows to save
     """
-    # Create output directory if it doesn't exist
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
-    # Save sample
     sample_df = df.head(n_rows)
     sample_df.to_csv(output_path, index=False)
-    
     logger.info(f"Saved {n_rows} sample rows to {output_path}")
 
 
@@ -394,7 +351,7 @@ def main():
     
     try:
         logger.info("=" * 60)
-        logger.info("Stock Portfolio Data Pipeline")
+        logger.info("Stock Portfolio Data Pipeline - Milestone 2")
         logger.info("=" * 60)
         
         # Step 1: Load data
@@ -402,19 +359,16 @@ def main():
         
         # Step 2: Clean data
         logger.info("\n--- Data Cleaning ---")
-        
-        cleaned_daily_trade_prices_df = impute_missing_values_from_portfolio(daily_trade_prices_df, trades_df)
-        cleaned_daily_trade_prices_df = handle_missing_values(
-            cleaned_daily_trade_prices_df, 
-            method='interpolate'
-        )
-
         cleaned_daily_trade_prices_df = handle_outliers(
-            cleaned_daily_trade_prices_df, 
-            method='log', 
+            daily_trade_prices_df, 
+            method='cap', 
             threshold=0.1
         )
-
+        cleaned_daily_trade_prices_df = handle_missing_values(
+            cleaned_daily_trade_prices_df, 
+            method='ffill'
+        )
+        
         trades_df = handle_outliers(
             trades_df, 
             method='cap', 
@@ -425,22 +379,57 @@ def main():
         logger.info("\n--- Data Integration ---")
         merged_df = integrate_data()
         
-        # Step 4: Display results
-        logger.info("\n--- Results ---")
-        logger.info("Integrated DataFrame Info:")
-        merged_df.info()
-        print("\nFirst 10 rows:")
-        print(merged_df.head(10))
+        # Step 4: Split for streaming (BEFORE encoding)
+        logger.info("\n--- Streaming Preparation ---")
+        main_df, stream_df = split_for_streaming(merged_df, stream_percentage=0.05)
         
-        # Step 5: Save sample CSV
-        logger.info("\n--- Saving Sample CSV ---")
-        save_sample_csv(merged_df)
+        # Save stream data
+        stream_df.to_csv('output/stream.csv', index=False)
+        logger.info("Stream data saved to output/stream.csv")
         
-        # Step 6: Wait for database and save
+        # Save streaming attributes from main dataset
+        save_streaming_attributes(main_df)
+        
+        # Step 5: Encode main dataset
+        logger.info("\n--- Data Encoding ---")
+        encoded_df, lookup_tables = encode_data(main_df)
+        
+        # Save lookup tables
+        save_lookup_tables(lookup_tables, output_dir='output/lookup_tables')
+        
+        # Step 6: Save encoded main dataset
+        logger.info("\n--- Saving Main Dataset ---")
+        save_sample_csv(encoded_df, 'output/sample_encoded.csv', n_rows=20)
+        encoded_df.to_csv('output/FULL_STOCKS.csv', index=False)
+        logger.info(f"Saved main encoded dataset to output/FULL_STOCKS.csv ({len(encoded_df)} rows)")
+        
+        # Step 7: Database operations
         logger.info("\n--- Database Operations ---")
         wait_for_db()
-        logger.info("Saving to database...")
-        save_to_db(merged_df, 'cleaned_stock_trades')
+        save_to_db(encoded_df, 'cleaned_stock_trades')
+        
+        # Step 8: Kafka Consumer (stream processing)
+        logger.info("\n--- Kafka Stream Processing ---")
+        logger.info("Starting Kafka consumer to process streamed data...")
+        
+        try:
+            wait_for_kafka()
+            # Get your student ID from environment or config
+            topic_name = os.getenv('KAFKA_TOPIC_NAME', '55_23722_23342_Topic')
+            
+            # Process streaming data
+            consumer = create_consumer(topic_name, bootstrap_servers='kafka:9092')
+            streamed_records = consume_and_process(
+                consumer, 
+                lookup_tables,
+                output_file='output/FULL_STOCKS.csv'
+            )
+            
+            logger.info(f"Processed {streamed_records} records from stream")
+            
+        except Exception as e:
+            logger.warning(f"Kafka consumer not available or error occurred: {e}")
+            logger.info("Skipping stream processing. Run producer.py separately to test streaming.")
         
         logger.info("\n" + "=" * 60)
         logger.info("Pipeline completed successfully!")
