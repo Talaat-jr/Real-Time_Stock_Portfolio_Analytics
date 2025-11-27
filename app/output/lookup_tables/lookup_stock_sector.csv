@@ -1,0 +1,6 @@
+Column_Name,Original_Value,Encoded_Value
+stock_sector,Consumer,0
+stock_sector,Energy,1
+stock_sector,Finance,2
+stock_sector,Healthcare,3
+stock_sector,Technology,4
