@@ -41,6 +41,6 @@ stock_industry,Renewables,4
 stock_industry,Retail,5
 stock_industry,Software,6
 stock_industry,Utilities,7
-is_weekend,False,0
-is_holiday,False,0
-is_holiday,True,1
+is_weekend,0,0
+is_holiday,0,0
+is_holiday,1,1

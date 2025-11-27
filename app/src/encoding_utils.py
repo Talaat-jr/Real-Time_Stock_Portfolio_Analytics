@@ -55,7 +55,7 @@ def encode_data(df):
             
             if mask_notna.sum() > 0:
                 # Fit and transform non-null values
-                df_encoded.loc[mask_notna, f'{col}_encoded'] = le.fit_transform(
+                df_encoded.loc[mask_notna, col] = le.fit_transform(
                     df_encoded.loc[mask_notna, col]
                 )
                 
@@ -76,9 +76,9 @@ def encode_data(df):
             
             # Convert boolean to int if needed
             if df_encoded[col].dtype == 'bool':
-                df_encoded[f'{col}_encoded'] = df_encoded[col].astype(int)
+                df_encoded[col] = df_encoded[col].astype(int)
             else:
-                df_encoded[f'{col}_encoded'] = df_encoded[col]
+                df_encoded[col] = df_encoded[col]
             
             # Create lookup table for binary
             unique_vals = df_encoded[col].dropna().unique()
@@ -132,11 +132,11 @@ def encode_single_record(record, lookup_tables):
             match = lookup_df[lookup_df['Original_Value'] == original_value]
             
             if not match.empty:
-                encoded_record[f'{col}_encoded'] = int(match.iloc[0]['Encoded_Value'])
+                encoded_record[col] = int(match.iloc[0]['Encoded_Value'])
             else:
                 # Handle unseen category (use -1 or most frequent)
                 logger.warning(f"Unknown value '{original_value}' for column '{col}'. Using -1.")
-                encoded_record[f'{col}_encoded'] = -1
+                encoded_record[col] = -1
     
     return encoded_record
 
