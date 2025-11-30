@@ -27,3 +27,7 @@ wheels/
 # Environment
 .env
 .env.local
+
+# Output
+*.crc
+_SUCCESS
