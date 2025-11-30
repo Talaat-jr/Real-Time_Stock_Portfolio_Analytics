@@ -91,6 +91,7 @@ services:
     container_name: spark-master
     command: >
       bash -c "
+        start-notebook.sh --NotebookApp.token='' &&
         mkdir -p /tmp/spark-logs &&
         /usr/local/spark/sbin/start-master.sh &&
         tail -f /tmp/spark-logs/* || tail -f /dev/null
@@ -98,6 +99,7 @@ services:
     ports:
       - "${SPARK_MASTER_WEBUI_PORT:-8080}:8080" # Spark Web UI
       - "${SPARK_MASTER_PORT:-7077}:7077" # Spark Master port
+      - "8888:8888"
     environment:
       - SPARK_NO_DAEMONIZE=true
       - SPARK_LOG_DIR=/tmp/spark-logs
