@@ -193,7 +193,7 @@ def main():
         spark = create_spark_session()
         
         # Load data
-        df = load_data(spark, "/opt/bitnami/spark/data/FULL_STOCKS.csv")
+        df = load_data(spark, "/opt/spark/data/FULL_STOCKS.csv")
         
         # Show sample data
         logger.info("\nSample data:")
@@ -203,22 +203,22 @@ def main():
         logger.info("\n--- Stock Performance Analysis ---")
         stock_perf = analyze_stock_performance(df)
         stock_perf.show(10)
-        save_analysis_results(stock_perf, "/opt/bitnami/spark/data/analysis_stock_performance")
+        save_analysis_results(stock_perf, "/opt/spark/data/analysis_stock_performance")
         
         logger.info("\n--- Sector Analysis ---")
         sector_analysis = analyze_by_sector(df)
         sector_analysis.show()
-        save_analysis_results(sector_analysis, "/opt/bitnami/spark/data/analysis_by_sector")
+        save_analysis_results(sector_analysis, "/opt/spark/data/analysis_by_sector")
         
         logger.info("\n--- Customer Type Analysis ---")
         customer_analysis = analyze_by_customer_type(df)
         customer_analysis.show()
-        save_analysis_results(customer_analysis, "/opt/bitnami/spark/data/analysis_by_customer_type")
+        save_analysis_results(customer_analysis, "/opt/spark/data/analysis_by_customer_type")
         
         logger.info("\n--- Temporal Patterns Analysis ---")
         temporal_analysis = analyze_temporal_patterns(df)
         temporal_analysis.show()
-        save_analysis_results(temporal_analysis, "/opt/bitnami/spark/data/analysis_temporal_patterns")
+        save_analysis_results(temporal_analysis, "/opt/spark/data/analysis_temporal_patterns")
         
         logger.info("\n" + "=" * 60)
         logger.info("Spark analysis completed successfully!")

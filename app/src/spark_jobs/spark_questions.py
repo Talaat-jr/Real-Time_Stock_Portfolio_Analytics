@@ -373,6 +373,9 @@ def sql_question_5_buy_sell_by_liquidity(spark, df):
     """
     SQL Q5: What is the total buy vs sell amount for each stock liquidity tier?
     
+    Note: transaction_type is encoded (0=BUY, 1=SELL typically, but check lookup table)
+    This query works with encoded values by grouping all transaction types.
+    
     Args:
         spark: SparkSession instance
         df: Spark DataFrame
@@ -386,17 +389,20 @@ def sql_question_5_buy_sell_by_liquidity(spark, df):
     
     df.createOrReplaceTempView("stocks")
     
+    # Get unique transaction types to determine encoding
+    transaction_types = df.select("transaction_type").distinct().collect()
+    logger.info(f"Transaction types in data: {[row.transaction_type for row in transaction_types]}")
+    
     query = """
         SELECT 
             stock_liquidity_tier,
-            SUM(CASE WHEN transaction_type = 'BUY' THEN total_trade_amount ELSE 0 END) as total_buy_amount,
-            SUM(CASE WHEN transaction_type = 'SELL' THEN total_trade_amount ELSE 0 END) as total_sell_amount,
+            transaction_type,
             SUM(total_trade_amount) as total_amount,
-            COUNT(CASE WHEN transaction_type = 'BUY' THEN 1 END) as buy_count,
-            COUNT(CASE WHEN transaction_type = 'SELL' THEN 1 END) as sell_count
+            COUNT(*) as transaction_count,
+            AVG(total_trade_amount) as avg_amount
         FROM stocks
-        GROUP BY stock_liquidity_tier
-        ORDER BY total_amount DESC
+        GROUP BY stock_liquidity_tier, transaction_type
+        ORDER BY stock_liquidity_tier, transaction_type
     """
     
     result = spark.sql(query)
@@ -404,6 +410,7 @@ def sql_question_5_buy_sell_by_liquidity(spark, df):
     logger.info("\nSQL Query:")
     logger.info(query)
     logger.info("\nResults:")
+    logger.info("(Note: transaction_type is encoded - check lookup_transaction_type.csv for mapping)")
     result.show(truncate=False)
     
     return result
@@ -446,8 +453,8 @@ def main():
         spark = create_spark_session("StockPortfolioAnalysis")
         
         # Determine data path based on environment
-        if os.path.exists('/opt/bitnami/spark/data/FULL_STOCKS.csv'):
-            data_path = '/opt/bitnami/spark/data/FULL_STOCKS.csv'
+        if os.path.exists('/opt/spark/data/FULL_STOCKS.csv'):
+            data_path = '/opt/spark/data/FULL_STOCKS.csv'
         elif os.path.exists('output/FULL_STOCKS.csv'):
             data_path = 'output/FULL_STOCKS.csv'
         else:
@@ -469,23 +476,23 @@ def main():
         
         # Q1: Total trading volume by ticker
         q1_result = question_1_total_volume_by_ticker(df)
-        save_results(q1_result, "output/spark_results/q1_volume_by_ticker")
+        save_results(q1_result, "/opt/spark/data/spark_results/q1_volume_by_ticker")
         
         # Q2: Average price by sector
         q2_result = question_2_avg_price_by_sector(df)
-        save_results(q2_result, "output/spark_results/q2_avg_price_by_sector")
+        save_results(q2_result, "/opt/spark/data/spark_results/q2_avg_price_by_sector")
         
         # Q3: Weekend transactions (buy vs sell)
         q3_result = question_3_weekend_transactions(df)
-        save_results(q3_result, "output/spark_results/q3_weekend_transactions")
+        save_results(q3_result, "/opt/spark/data/spark_results/q3_weekend_transactions")
         
         # Q4: Customers with >10 transactions
         q4_result = question_4_customers_more_than_10_transactions(df)
-        save_results(q4_result, "output/spark_results/q4_active_customers")
+        save_results(q4_result, "/opt/spark/data/spark_results/q4_active_customers")
         
         # Q5: Total trade amount by day of week
         q5_result = question_5_total_trade_by_day(df)
-        save_results(q5_result, "output/spark_results/q5_trade_by_day")
+        save_results(q5_result, "/opt/spark/data/spark_results/q5_trade_by_day")
         
         # ====================================================================
         # 3.3.3: SPARK SQL ANALYSIS
@@ -497,23 +504,23 @@ def main():
         
         # SQL Q1: Top 5 stocks by quantity
         sql_q1_result = sql_question_1_top_5_stocks_by_quantity(spark, df)
-        save_results(sql_q1_result, "output/spark_results/sql_q1_top_5_stocks")
+        save_results(sql_q1_result, "/opt/spark/data/spark_results/sql_q1_top_5_stocks")
         
         # SQL Q2: Average trade by account type
         sql_q2_result = sql_question_2_avg_trade_by_account_type(spark, df)
-        save_results(sql_q2_result, "output/spark_results/sql_q2_avg_by_account")
+        save_results(sql_q2_result, "/opt/spark/data/spark_results/sql_q2_avg_by_account")
         
         # SQL Q3: Holiday vs non-holiday transactions
         sql_q3_result = sql_question_3_holiday_vs_non_holiday(spark, df)
-        save_results(sql_q3_result, "output/spark_results/sql_q3_holiday_comparison")
+        save_results(sql_q3_result, "/opt/spark/data/spark_results/sql_q3_holiday_comparison")
         
         # SQL Q4: Sectors with highest weekend volume
         sql_q4_result = sql_question_4_sectors_weekend_volume(spark, df)
-        save_results(sql_q4_result, "output/spark_results/sql_q4_weekend_sectors")
+        save_results(sql_q4_result, "/opt/spark/data/spark_results/sql_q4_weekend_sectors")
         
         # SQL Q5: Buy vs sell by liquidity tier
         sql_q5_result = sql_question_5_buy_sell_by_liquidity(spark, df)
-        save_results(sql_q5_result, "output/spark_results/sql_q5_liquidity_analysis")
+        save_results(sql_q5_result, "/opt/spark/data/spark_results/sql_q5_liquidity_analysis")
         
         # ====================================================================
         # SUMMARY

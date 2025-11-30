@@ -23,36 +23,30 @@ mkdir -p output/spark_results
 echo "✅ Created output/spark_results directory"
 echo ""
 
-# Copy FULL_STOCKS.csv to Spark master container
-echo "📋 Copying FULL_STOCKS.csv to Spark master..."
-docker cp output/FULL_STOCKS.csv stock_spark_master:/opt/bitnami/spark/data/
-if [ $? -eq 0 ]; then
-    echo "✅ File copied successfully"
-else
-    echo "❌ Failed to copy file. Is Spark master running?"
+# Check if Spark master is running
+echo "🔍 Checking if Spark master is running..."
+if ! docker ps | grep -q "spark-master"; then
+    echo "❌ Spark master is not running"
+    echo "Please start it with: docker-compose up -d spark-master spark-worker"
     exit 1
 fi
+echo "✅ Spark master is running"
 echo ""
 
-# Copy Spark analysis script
-echo "📋 Copying spark_analysis.py to Spark master..."
-docker cp spark_jobs/spark_analysis.py stock_spark_master:/opt/bitnami/spark/jobs/
-if [ $? -eq 0 ]; then
-    echo "✅ Script copied successfully"
-else
-    echo "❌ Failed to copy script"
-    exit 1
-fi
+# Note: Files are already accessible via shared volumes
+echo "📋 Files are accessible via shared volumes:"
+echo "   - FULL_STOCKS.csv -> /opt/spark/data/FULL_STOCKS.csv"
+echo "   - spark_questions.py -> /opt/spark/jobs/spark_questions.py"
 echo ""
 
 # Submit Spark job
 echo "🚀 Submitting Spark job..."
 echo "=============================================="
-docker-compose exec spark-master spark-submit \
+docker-compose exec -T spark-master spark-submit \
     --master spark://spark-master:7077 \
     --executor-memory 2g \
     --driver-memory 1g \
-    /opt/bitnami/spark/jobs/spark_analysis.py
+    /opt/spark/jobs/spark_questions.py
 
 if [ $? -eq 0 ]; then
     echo ""
