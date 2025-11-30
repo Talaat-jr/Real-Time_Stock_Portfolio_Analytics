@@ -91,21 +91,22 @@ services:
     container_name: spark-master
     command: >
       bash -c "
-        start-notebook.sh --NotebookApp.token='' &&
-        mkdir -p /tmp/spark-logs &&
+        mkdir -p /tmp/spark-logs /opt/spark/data /opt/spark/jobs &&
         /usr/local/spark/sbin/start-master.sh &&
         tail -f /tmp/spark-logs/* || tail -f /dev/null
       "
     ports:
       - "${SPARK_MASTER_WEBUI_PORT:-8080}:8080" # Spark Web UI
       - "${SPARK_MASTER_PORT:-7077}:7077" # Spark Master port
-      - "8888:8888"
     environment:
       - SPARK_NO_DAEMONIZE=true
       - SPARK_LOG_DIR=/tmp/spark-logs
       - SPARK_MASTER_HOST=spark-master
       - SPARK_MASTER_PORT=7077
       - SPARK_MASTER_WEBUI_PORT=8080
+    volumes:
+      - ./output:/opt/spark/data
+      - ./src/spark_jobs:/opt/spark/jobs
     networks:
       - stock_network
     restart: unless-stopped
@@ -132,10 +133,34 @@ services:
       - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-2g} # Referenced from .env
       - SPARK_WORKER_WEBUI_PORT=8081
       - SPARK_MASTER=spark://spark-master:7077
+    volumes:
+      - ./output:/opt/spark/data
+      - ./src/spark_jobs:/opt/spark/jobs
+      - ./output:/home/jovyan/output
     networks:
       - stock_network
     restart: unless-stopped
 
+  # Jupyter Notebook for Spark Analysis
+  jupyter:
+    image: quay.io/jupyter/pyspark-notebook:2024-10-14
+    container_name: jupyter
+    command: start-notebook.sh --NotebookApp.token=''
+    volumes:
+      - ../notebook:/home/jovyan/work
+      - ./output:/home/jovyan/output
+      - ./src/spark_jobs:/home/jovyan/spark_jobs
+    ports:
+      - "8888:8888"
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - SPARK_MASTER=spark://spark-master:7077
+    depends_on:
+      - spark-master
+      - spark-worker
+    networks:
+      - stock_network
+    restart: unless-stopped
   # ------------------------------------------------------------------
   # APPLICATION SERVICE
   # ------------------------------------------------------------------
