@@ -191,11 +191,29 @@ services:
         condition: service_started
     networks:
       - stock_network
-    command: >
-      bash -c "
-        python src/producer.py &&
-        python src/app.py
-      "
+    command: python src/app.py
+    # command: tail -f /dev/null
+    restart: on-failure
+
+  # Kafka Producer Service
+  producer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stock_trading_producer
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    volumes:
+      - ./src:/app/src
+      - ./output:/app/output
+    depends_on:
+      kafka:
+        condition: service_started
+      app:
+        condition: service_started
+    networks:
+      - stock_network
+    command: python src/producer.py
     # command: tail -f /dev/null
     restart: on-failure
 

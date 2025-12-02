@@ -177,12 +177,12 @@ def main():
     parser.add_argument('--stream-file', default='output/stream.csv', help='Path to stream CSV file')
     parser.add_argument('--topic', default=None, help='Kafka topic name (default: STUDENT_ID_Topic)')
     parser.add_argument('--sleep-ms', type=int, default=300, help='Milliseconds between records (default: 300)')
-    parser.add_argument('--bootstrap-servers', default='localhost:9092', help='Kafka bootstrap servers')
+    parser.add_argument('--bootstrap-servers', default='kafka:9092', help='Kafka bootstrap servers')
     
     args = parser.parse_args()
     
     # Override default bootstrap servers if provided
-    if args.bootstrap_servers != 'localhost:9092':
+    if args.bootstrap_servers != 'kafka:9092':
         # This would require modifying create_producer to accept bootstrap_servers
         logger.info(f"Using bootstrap servers: {args.bootstrap_servers}")
     
