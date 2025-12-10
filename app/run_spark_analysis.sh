@@ -20,6 +20,7 @@ echo ""
 
 # Create output directory for Spark results
 mkdir -p output/spark_results
+chmod -R 777 output/spark_results 2>/dev/null || true
 echo "✅ Created output/spark_results directory"
 echo ""
 
@@ -42,7 +43,7 @@ echo ""
 # Submit Spark job
 echo "🚀 Submitting Spark job..."
 echo "=============================================="
-docker-compose exec -T spark-master spark-submit \
+docker compose exec -T spark-master spark-submit \
     --master spark://spark-master:7077 \
     --executor-memory 2g \
     --driver-memory 1g \
