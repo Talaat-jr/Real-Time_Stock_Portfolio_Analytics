@@ -89,9 +89,11 @@ services:
   spark-master:
     image: quay.io/jupyter/pyspark-notebook:2024-10-14
     container_name: spark-master
+    user: root
     command: >
       bash -c "
-        mkdir -p /tmp/spark-logs /opt/spark/data /opt/spark/jobs &&
+        mkdir -p /tmp/spark-logs /opt/spark/data /opt/spark/jobs /opt/spark/data/spark_results &&
+        chmod -R 777 /opt/spark/data &&
         /usr/local/spark/sbin/start-master.sh &&
         tail -f /tmp/spark-logs/* || tail -f /dev/null
       "
@@ -115,9 +117,11 @@ services:
   spark-worker:
     image: quay.io/jupyter/pyspark-notebook:2024-10-14
     container_name: spark-worker
+    user: root
     command: >
       bash -c "
-        mkdir -p /tmp/spark-logs /tmp/spark-work &&
+        mkdir -p /tmp/spark-logs /tmp/spark-work /opt/spark/data/spark_results &&
+        chmod -R 777 /opt/spark/data &&
         /usr/local/spark/sbin/start-worker.sh spark://spark-master:7077 &&
         tail -f /tmp/spark-logs/* || tail -f /dev/null
       "
@@ -213,8 +217,8 @@ services:
         condition: service_started
     networks:
       - stock_network
-    command: python src/producer.py
-    # command: tail -f /dev/null
+    # command: python src/producer.py
+    command: tail -f /dev/null
     restart: on-failure
 
 # ------------------------------------------------------------------
