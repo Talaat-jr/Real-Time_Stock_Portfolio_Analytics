@@ -1211,6 +1211,7 @@ def start_ai_query_interface_task(**context):
 def process_with_ai_agent_task(**context):
     """
     Task: Process natural language query using AI agent (Gemini) and generate SQL.
+    Executes the SQL query and saves results to CSV.
     Reads from user_query.txt and saves logs to agents/logs/ directory.
     Simplified translation logs saved to AGENT_LOGS.JSON.
     """
@@ -1218,7 +1219,7 @@ def process_with_ai_agent_task(**context):
     
     try:
         # Import AI agent
-        from ai_agent import NL2SQLAgent, read_query_file
+        from ai_agent import NL2SQLAgent, read_query_file, execute_and_format_sql, save_results_to_csv
         from db_utils import get_enhanced_table_context
         
         # Read user query
@@ -1259,11 +1260,41 @@ def process_with_ai_agent_task(**context):
             logger.info(f"  Execution time: {result['execution_time_ms']:.2f}ms")
             logger.info(f"  Detailed log saved: {result.get('detailed_log_saved', False)}")
             
-            # Push to XCom for downstream tasks
-            context['task_instance'].xcom_push(key='generated_sql', value=generated_sql)
-            context['task_instance'].xcom_push(key='user_query', value=user_query)
-            
-            return generated_sql
+            # Execute the SQL query
+            logger.info("Executing generated SQL query...")
+            try:
+                query_df = execute_and_format_sql(generated_sql)
+                logger.info(f"✓ Query executed successfully: {len(query_df)} rows returned")
+                
+                # Save results to CSV
+                logger.info("Saving query results to CSV...")
+                csv_path = save_results_to_csv(generated_sql)
+                logger.info(f"✓ Results saved to: {csv_path}")
+                logger.info(f"  Total rows: {len(query_df)}")
+                logger.info(f"  Columns: {', '.join(query_df.columns.tolist())}")
+                
+                # Show preview of results
+                if len(query_df) > 0:
+                    logger.info("Query results preview (first 5 rows):")
+                    logger.info(f"\n{query_df.head().to_string()}")
+                else:
+                    logger.warning("Query returned 0 rows")
+                
+                # Push to XCom for downstream tasks
+                context['task_instance'].xcom_push(key='generated_sql', value=generated_sql)
+                context['task_instance'].xcom_push(key='user_query', value=user_query)
+                context['task_instance'].xcom_push(key='query_results_csv', value=csv_path)
+                context['task_instance'].xcom_push(key='query_row_count', value=len(query_df))
+                
+                return generated_sql
+                
+            except Exception as exec_error:
+                logger.error(f"✗ Failed to execute SQL query: {exec_error}")
+                logger.error(f"  SQL: {generated_sql}")
+                # Still push the SQL even if execution failed
+                context['task_instance'].xcom_push(key='generated_sql', value=generated_sql)
+                context['task_instance'].xcom_push(key='user_query', value=user_query)
+                raise
         else:
             error_msg = result.get('error', 'Unknown error')
             logger.error(f"✗ AI Agent failed: {error_msg}")
@@ -1275,6 +1306,24 @@ def process_with_ai_agent_task(**context):
             
             # Save fallback to simplified log
             agent.save_translation_log(user_query, fallback_sql)
+            
+            # Try to execute fallback SQL
+            try:
+                logger.info("Executing fallback SQL query...")
+                query_df = execute_and_format_sql(fallback_sql)
+                logger.info(f"✓ Fallback query executed: {len(query_df)} rows returned")
+                
+                # Save fallback results to CSV
+                csv_path = save_results_to_csv(fallback_sql)
+                logger.info(f"✓ Fallback results saved to: {csv_path}")
+                
+                context['task_instance'].xcom_push(key='generated_sql', value=fallback_sql)
+                context['task_instance'].xcom_push(key='user_query', value=user_query)
+                context['task_instance'].xcom_push(key='query_results_csv', value=csv_path)
+                context['task_instance'].xcom_push(key='query_row_count', value=len(query_df))
+                
+            except Exception as fallback_error:
+                logger.error(f"Fallback SQL execution also failed: {fallback_error}")
             
             context['task_instance'].xcom_push(key='generated_sql', value=fallback_sql)
             context['task_instance'].xcom_push(key='user_query', value=user_query)
@@ -1289,6 +1338,17 @@ def process_with_ai_agent_task(**context):
         # Ultimate fallback
         fallback_sql = "SELECT stock_sector, SUM(quantity) as total_volume FROM stock_trades_integrated GROUP BY stock_sector ORDER BY total_volume DESC LIMIT 10"
         logger.info(f"Using ultimate fallback SQL: {fallback_sql}")
+        
+        try:
+            # Try to execute ultimate fallback
+            from ai_agent import execute_and_format_sql, save_results_to_csv
+            query_df = execute_and_format_sql(fallback_sql)
+            csv_path = save_results_to_csv(fallback_sql)
+            logger.info(f"✓ Ultimate fallback executed and saved to: {csv_path}")
+            context['task_instance'].xcom_push(key='query_results_csv', value=csv_path)
+            context['task_instance'].xcom_push(key='query_row_count', value=len(query_df))
+        except Exception as ultimate_error:
+            logger.error(f"Ultimate fallback execution failed: {ultimate_error}")
         
         return fallback_sql
 

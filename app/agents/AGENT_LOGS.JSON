@@ -34,5 +34,17 @@
   {
     "user_query": "What was the total trading volume for oil stocks?",
     "agent_response": "SELECT SUM(quantity) FROM stock_trades_integrated WHERE stock_sector = 'Oil & Gas' LIMIT 1000;"
+  },
+  {
+    "user_query": "What was the total trading volume for oil stocks?",
+    "agent_response": "SELECT SUM(quantity) FROM stock_trades_integrated WHERE stock_sector ILIKE '%Oil%' LIMIT 1000;"
+  },
+  {
+    "user_query": "What was the total trading volume for oil stocks?",
+    "agent_response": "SELECT SUM(quantity) FROM stock_trades_integrated WHERE stock_sector = 'Oil & Gas' LIMIT 1000;"
+  },
+  {
+    "user_query": "What was the total trading volume for Technology stocks?",
+    "agent_response": "SELECT SUM(quantity) FROM stock_trades_integrated WHERE stock_sector = 'Technology' LIMIT 1000;"
   }
 ]
