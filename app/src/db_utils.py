@@ -252,13 +252,13 @@ def save_to_db(df: pd.DataFrame, table_name: str, if_exists: str = 'replace') ->
         engine.dispose()
 
 
-def read_from_db(table_name: str, query: Optional[str] = None) -> pd.DataFrame:
+def read_from_db(table_name: Optional[str] = None, query: Optional[str] = None) -> pd.DataFrame:
     """
     Read data from PostgreSQL database using SQLAlchemy.
     
     Args:
-        table_name: Name of the table to read
-        query: Optional SQL query (if None, reads entire table)
+        table_name: Optional name of the table to read (required if query is None)
+        query: Optional SQL query (if None, reads entire table using table_name)
     
     Returns:
         pd.DataFrame: Data from database
@@ -267,9 +267,12 @@ def read_from_db(table_name: str, query: Optional[str] = None) -> pd.DataFrame:
         engine = create_db_engine()
         
         if query is None:
+            if table_name is None:
+                raise ValueError("Either table_name or query must be provided")
             query = f"SELECT * FROM {table_name}"
         
-        df = pd.read_sql(query, engine)
+        # Use text() to ensure proper SQL string handling for SQLAlchemy 2.0+
+        df = pd.read_sql(text(query), engine)
         logger.info(f"Successfully read {len(df)} rows from database")
         
         return df
