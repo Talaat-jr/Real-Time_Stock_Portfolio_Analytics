@@ -375,6 +375,8 @@ services:
     <<: *airflow-common
     container_name: stock_airflow_worker
     command: celery worker
+    ports:
+      - "8501:8501"  # Expose Streamlit dashboard port
     healthcheck:
       test:
         - "CMD-SHELL"
