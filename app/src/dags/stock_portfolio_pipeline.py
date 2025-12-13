@@ -32,6 +32,7 @@ from dag_tasks import (
     
     # Stage 5: Data Visualization
     prepare_visualization_task,
+    start_streamlit_dashboard_task,
     
     # Stage 6: AI Agent
     process_with_ai_agent_task
@@ -129,10 +130,11 @@ with DAG(
             python_callable=prepare_visualization_task,
         )
 
-        start_visualization_service = BashOperator(
+        # Start Streamlit dashboard after data is prepared
+        # Dashboard will be accessible at http://localhost:8501
+        start_visualization_service = PythonOperator(
             task_id='start_visualization_service',
-            bash_command='streamlit run /opt/airflow/src/dashboard.py --server.port 8501 --server.address 0.0.0.0 &',
-            dag=dag,
+            python_callable=start_streamlit_dashboard_task,
         )
 
         prepare_visualization >> start_visualization_service

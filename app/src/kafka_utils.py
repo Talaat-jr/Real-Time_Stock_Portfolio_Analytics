@@ -25,7 +25,7 @@ def create_consumer(topic_name, bootstrap_servers='kafka:9092', group_id='stock_
     consumer = KafkaConsumer(
         topic_name,
         bootstrap_servers=bootstrap_servers,
-        auto_offset_reset='latest',  # Start from beginning if no offset
+        auto_offset_reset='earliest',  # Start from beginning if no offset
         enable_auto_commit=True,
         group_id=group_id,
         value_deserializer=lambda x: json.loads(x.decode('utf-8')),

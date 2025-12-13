@@ -339,6 +339,12 @@ def consume_and_process_stream_task(**context):
     topic_name = os.getenv('KAFKA_TOPIC_NAME', '55_23722_23342_Topic')
     
     try:
+        # Count records before streaming
+        full_stocks_path = os.path.join(OUTPUT_DIR, 'FULL_STOCKS.csv')
+        before_df = pd.read_csv(full_stocks_path)
+        records_before = len(before_df)
+        logger.info(f"Records BEFORE streaming: {records_before}")
+        
         # Use YOUR original create_consumer function
         consumer = create_consumer(topic_name, bootstrap_servers='kafka:9092')
         
@@ -346,13 +352,26 @@ def consume_and_process_stream_task(**context):
         streamed_records = consume_and_process(
             consumer,
             lookup_tables,
-            output_file=os.path.join(OUTPUT_DIR, 'FULL_STOCKS.csv')
+            output_file=full_stocks_path
         )
         
-        logger.info(f"Processed {streamed_records} records from stream")
+        # Count records after streaming
+        after_df = pd.read_csv(full_stocks_path)
+        records_after = len(after_df)
+        logger.info(f"Records AFTER streaming: {records_after}")
+        logger.info(f"Processed {streamed_records} records from Kafka stream")
+        logger.info(f"Net increase: {records_after - records_before} records")
+        
+        # Verify we got all the streamed records
+        if streamed_records > 0 and (records_after - records_before) != streamed_records:
+            logger.warning(f"⚠ MISMATCH: Expected {streamed_records} new records, but got {records_after - records_before}")
+        else:
+            logger.info(f"✓ Successfully appended all {streamed_records} streamed records")
         
         # Push to XCom
-        context['task_instance'].xcom_push(key='final_stocks', value=os.path.join(OUTPUT_DIR, 'FULL_STOCKS.csv'))
+        context['task_instance'].xcom_push(key='final_stocks', value=full_stocks_path)
+        context['task_instance'].xcom_push(key='streamed_record_count', value=streamed_records)
+        context['task_instance'].xcom_push(key='total_records', value=records_after)
         
         logger.info("✓ Stream consumed and processed successfully")
         
@@ -772,38 +791,258 @@ def run_spark_analytics_task(**context):
 def prepare_visualization_task(**context):
     """
     Task: Prepare columns and aggregations for visualization.
-    Revert encoding transformations if needed.
+    Revert encoding transformations and create aggregated views for dashboard.
     """
     logger.info("=== TASK: Prepare Visualization Data ===")
     
-    # Read FINAL_STOCKS
-    final_path = context['task_instance'].xcom_pull(key='final_stocks', task_ids='kafka_streaming.consume_and_process_stream')
-    df = pd.read_csv(final_path)
+    try:
+        # Read FINAL_STOCKS (encoded data from Kafka stream)
+        final_path = context['task_instance'].xcom_pull(key='final_stocks', task_ids='kafka_streaming.consume_and_process_stream')
+        if not final_path or not os.path.exists(final_path):
+            logger.warning("FINAL_STOCKS not available, using integrated_data instead")
+            final_path = os.path.join(OUTPUT_DIR, 'integrated_data.csv')
+        
+        df = pd.read_csv(final_path)
+        logger.info(f"Loaded data: {df.shape}")
+        
+        # Load lookup tables for decoding
+        lookup_dir = context['task_instance'].xcom_pull(key='lookup_tables_dir', task_ids='encoding_stream_preparation.encode_categorical_data')
+        if not lookup_dir:
+            lookup_dir = os.path.join(OUTPUT_DIR, 'lookup_tables')
+        
+        # Load all encodings lookup table
+        all_encodings_path = os.path.join(lookup_dir, 'lookup_all_encodings.csv')
+        if os.path.exists(all_encodings_path):
+            all_encodings_df = pd.read_csv(all_encodings_path)
+            
+            # Create reverse lookup dictionaries grouped by column
+            reverse_lookups = {}
+            for col_name in all_encodings_df['Column_Name'].unique():
+                col_mappings = all_encodings_df[all_encodings_df['Column_Name'] == col_name]
+                reverse_lookups[col_name] = dict(zip(col_mappings['Encoded_Value'], col_mappings['Original_Value']))
+            
+            # Decode categorical columns for visualization
+            decoded_df = df.copy()
+            for col, reverse_map in reverse_lookups.items():
+                if col in decoded_df.columns:
+                    decoded_df[col] = decoded_df[col].map(reverse_map).fillna(decoded_df[col])
+                    logger.info(f"Decoded column: {col}")
+        else:
+            # If no encoding was done, use original data
+            logger.warning("No encoding lookup found, using original data")
+            decoded_df = df.copy()
+        
+        # Ensure timestamp is datetime
+        if 'timestamp' in decoded_df.columns:
+            decoded_df['timestamp'] = pd.to_datetime(decoded_df['timestamp'])
+            decoded_df['date'] = decoded_df['timestamp'].dt.date
+            decoded_df['year'] = decoded_df['timestamp'].dt.year
+            decoded_df['month'] = decoded_df['timestamp'].dt.month
+            decoded_df['month_name'] = decoded_df['timestamp'].dt.strftime('%B')
+        
+        # Save fully decoded data for visualization
+        decoded_path = save_csv_file(decoded_df, 'FINAL_STOCKS_DECODED.csv')
+        logger.info(f"Saved decoded data: {decoded_path}")
+        
+        # Create aggregated views for dashboard performance
+        
+        # 1. Volume by Ticker aggregation
+        volume_by_ticker = decoded_df.groupby('stock_ticker').agg({
+            'quantity': 'sum',
+            'total_trade_amount': 'sum',
+            'transaction_id': 'count'
+        }).reset_index()
+        volume_by_ticker.columns = ['stock_ticker', 'total_volume', 'total_amount', 'transaction_count']
+        save_csv_file(volume_by_ticker, 'agg_volume_by_ticker.csv')
+        
+        # 2. Price trends by Sector
+        price_by_sector = decoded_df.groupby(['stock_sector', 'timestamp']).agg({
+            'stock_price': 'mean',
+            'total_trade_amount': 'sum'
+        }).reset_index()
+        save_csv_file(price_by_sector, 'agg_price_by_sector.csv')
+        
+        # 3. Buy vs Sell summary
+        buy_sell_summary = decoded_df.groupby('transaction_type').agg({
+            'quantity': 'sum',
+            'total_trade_amount': 'sum',
+            'transaction_id': 'count'
+        }).reset_index()
+        buy_sell_summary.columns = ['transaction_type', 'total_quantity', 'total_amount', 'transaction_count']
+        save_csv_file(buy_sell_summary, 'agg_buy_vs_sell.csv')
+        
+        # 4. Trading by Day of Week
+        trading_by_day = decoded_df.groupby('day_name').agg({
+            'quantity': 'sum',
+            'total_trade_amount': 'sum',
+            'transaction_id': 'count'
+        }).reset_index()
+        trading_by_day.columns = ['day_name', 'total_volume', 'total_amount', 'transaction_count']
+        save_csv_file(trading_by_day, 'agg_trading_by_day.csv')
+        
+        # 5. Customer distribution
+        customer_distribution = decoded_df.groupby('customer_id').agg({
+            'total_trade_amount': 'sum',
+            'transaction_id': 'count',
+            'customer_account_type': 'first'
+        }).reset_index()
+        customer_distribution.columns = ['customer_id', 'total_amount', 'transaction_count', 'account_type']
+        customer_distribution = customer_distribution.sort_values('total_amount', ascending=False)
+        save_csv_file(customer_distribution, 'agg_customer_distribution.csv')
+        
+        # 6. Top 10 Customers
+        top_customers = customer_distribution.head(10)
+        save_csv_file(top_customers, 'agg_top_10_customers.csv')
+        
+        # 7. Holiday vs Non-Holiday
+        holiday_comparison = decoded_df.groupby('is_holiday').agg({
+            'quantity': 'sum',
+            'total_trade_amount': 'sum',
+            'transaction_id': 'count'
+        }).reset_index()
+        holiday_comparison['is_holiday'] = holiday_comparison['is_holiday'].map({False: 'Non-Holiday', True: 'Holiday'})
+        save_csv_file(holiday_comparison, 'agg_holiday_comparison.csv')
+        
+        # 8. Sector comparison
+        sector_comparison = decoded_df.groupby('stock_sector').agg({
+            'total_trade_amount': ['sum', 'mean'],
+            'quantity': 'sum',
+            'transaction_id': 'count'
+        }).reset_index()
+        sector_comparison.columns = ['stock_sector', 'total_amount', 'avg_amount', 'total_volume', 'transaction_count']
+        save_csv_file(sector_comparison, 'agg_sector_comparison.csv')
+        
+        # 9. Liquidity tier analysis
+        liquidity_analysis = decoded_df.groupby(['stock_liquidity_tier', 'timestamp']).agg({
+            'total_trade_amount': 'sum',
+            'quantity': 'sum'
+        }).reset_index()
+        save_csv_file(liquidity_analysis, 'agg_liquidity_analysis.csv')
+        
+        # Save metadata about the visualization data
+        metadata = {
+            'total_transactions': len(decoded_df),
+            'date_range': {
+                'start': str(decoded_df['timestamp'].min()) if 'timestamp' in decoded_df.columns else 'N/A',
+                'end': str(decoded_df['timestamp'].max()) if 'timestamp' in decoded_df.columns else 'N/A'
+            },
+            'unique_stocks': int(decoded_df['stock_ticker'].nunique()) if 'stock_ticker' in decoded_df.columns else 0,
+            'unique_customers': int(decoded_df['customer_id'].nunique()) if 'customer_id' in decoded_df.columns else 0,
+            'total_volume': float(decoded_df['quantity'].sum()) if 'quantity' in decoded_df.columns else 0,
+            'total_trade_amount': float(decoded_df['total_trade_amount'].sum()) if 'total_trade_amount' in decoded_df.columns else 0
+        }
+        
+        import json
+        metadata_path = os.path.join(OUTPUT_DIR, 'visualization_metadata.json')
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        # Push to XCom
+        context['task_instance'].xcom_push(key='viz_data', value=decoded_path)
+        context['task_instance'].xcom_push(key='viz_metadata', value=metadata_path)
+        
+        logger.info("✓ Visualization data prepared successfully")
+        logger.info(f"  - Total transactions: {metadata['total_transactions']}")
+        logger.info(f"  - Unique stocks: {metadata['unique_stocks']}")
+        logger.info(f"  - Unique customers: {metadata['unique_customers']}")
+        
+    except Exception as e:
+        logger.error(f"Error in prepare_visualization_task: {str(e)}")
+        raise
+
+
+def start_streamlit_dashboard_task(**context):
+    """
+    Task: Start Streamlit dashboard after data is prepared.
+    Kills existing Streamlit processes and starts a new one.
+    """
+    logger.info("=== TASK: Start Streamlit Dashboard ===")
     
-    # Load lookup tables for decoding
-    lookup_dir = context['task_instance'].xcom_pull(key='lookup_tables_dir', task_ids='encoding_stream_preparation.encode_categorical_data')
+    import subprocess
+    import signal
     
-    # Create reverse lookup tables
-    reverse_lookups = {}
-    for filename in os.listdir(lookup_dir):
-        if filename.startswith('lookup_') and filename != 'lookup_all_encodings.csv':
-            col_name = filename.replace('lookup_', '').replace('.csv', '')
-            lookup_df = pd.read_csv(os.path.join(lookup_dir, filename))
-            reverse_lookups[col_name] = dict(zip(lookup_df['encoded_value'], lookup_df['original_value']))
-    
-    # Decode categorical columns for visualization
-    decoded_df = df.copy()
-    for col, reverse_map in reverse_lookups.items():
-        if col in decoded_df.columns:
-            decoded_df[col] = decoded_df[col].map(reverse_map).fillna(decoded_df[col])
-    
-    # Save decoded data for visualization
-    save_csv_file(decoded_df, 'FINAL_STOCKS_DECODED.csv')
-    
-    # Push to XCom
-    context['task_instance'].xcom_push(key='viz_data', value=os.path.join(OUTPUT_DIR, 'FINAL_STOCKS_DECODED.csv'))
-    
-    logger.info("✓ Visualization data prepared successfully")
+    try:
+        # Kill any existing Streamlit processes
+        logger.info("Checking for existing Streamlit processes...")
+        try:
+            subprocess.run(
+                ['pkill', '-f', 'streamlit run.*dashboard.py'],
+                timeout=5
+            )
+            logger.info("Killed existing Streamlit processes")
+            time.sleep(2)
+        except subprocess.TimeoutExpired:
+            logger.warning("Timeout while killing processes")
+        except Exception as e:
+            logger.info(f"No existing processes to kill: {e}")
+        
+        # Start Streamlit in background
+        logger.info("Starting Streamlit dashboard...")
+        dashboard_path = '/opt/airflow/src/dashboard.py'
+        log_file = '/opt/airflow/logs/streamlit.log'
+        
+        # Open log file
+        log_handle = open(log_file, 'w')
+        
+        # Start streamlit process
+        process = subprocess.Popen(
+            [
+                'streamlit', 'run', dashboard_path,
+                '--server.port', '8501',
+                '--server.address', '0.0.0.0',
+                '--server.headless', 'true',
+                '--server.enableCORS', 'false',
+                '--server.enableXsrfProtection', 'false'
+            ],
+            stdout=log_handle,
+            stderr=log_handle,
+            start_new_session=True  # Detach from parent process
+        )
+        
+        logger.info(f"Streamlit process started with PID: {process.pid}")
+        
+        # Wait a bit for startup
+        time.sleep(8)
+        
+        # Verify it's running
+        result = subprocess.run(
+            ['pgrep', '-f', 'streamlit run.*dashboard.py'],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0 and result.stdout.strip():
+            pids = result.stdout.strip().split('\n')
+            logger.info(f"✓ Streamlit dashboard started successfully!")
+            logger.info(f"  PIDs: {', '.join(pids)}")
+            logger.info(f"  Port: 8501")
+            logger.info(f"  Access at: http://localhost:8501")
+            logger.info(f"  Logs: {log_file}")
+            
+            # Store PID in XCom for potential cleanup
+            context['task_instance'].xcom_push(key='streamlit_pids', value=pids)
+            
+            return True
+        else:
+            logger.error("✗ Failed to start Streamlit dashboard")
+            logger.error(f"Check logs at: {log_file}")
+            
+            # Try to read last few lines of log
+            try:
+                with open(log_file, 'r') as f:
+                    lines = f.readlines()
+                    if lines:
+                        logger.error("Last log lines:")
+                        for line in lines[-10:]:
+                            logger.error(f"  {line.strip()}")
+            except:
+                pass
+            
+            raise Exception("Streamlit failed to start")
+            
+    except Exception as e:
+        logger.error(f"Error starting Streamlit: {str(e)}")
+        raise
 
 
 # =============================================================================
