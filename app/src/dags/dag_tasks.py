@@ -429,15 +429,8 @@ def create_spark_session(**context):
         .config("spark.sql.execution.arrow.pyspark.enabled", "false")  # Disable arrow for stability
         .config("spark.driver.maxResultSize", "512m")
         .config("spark.rpc.message.maxSize", "256")
-        .config("spark.sql.adaptive.enabled", "true")  # Enable adaptive query execution
-        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
-        .config("spark.python.worker.reuse", "false")  # Prevent worker reuse issues
-        .config("spark.storage.memoryFraction", "0.6")  # Better memory management
         .getOrCreate()
     )
-    
-    # Set log level to reduce noise
-    spark.sparkContext.setLogLevel("WARN")
     
     return spark
 
@@ -624,29 +617,24 @@ def run_spark_analytics_task(**context):
             # For one-hot encoded sectors, compute avg for each
             sector_results = []
             for col in sector_cols:
-                try:
-                    sector_name = col.replace("sector_", "")
-                    # Use first() instead of collect() for safer single-value retrieval
-                    avg_price_row = df.filter(F.col(col) == 1).agg(
-                        F.avg("stock_price").alias("stock_price_logged")
-                    ).first()
+                sector_name = col.replace("sector_", "")
+                avg_price_rows = df.filter(F.col(col) == 1).agg(
+                    F.avg("stock_price").alias("stock_price_logged")
+                ).collect()
+                
+                if avg_price_rows and avg_price_rows[0][0] is not None:
+                    avg_price_logged = avg_price_rows[0][0]
                     
-                    if avg_price_row and avg_price_row[0] is not None:
-                        avg_price_logged = avg_price_row[0]
-                        
-                        # Also compute original price average if available
-                        if 'stock_price_original' in df.columns:
-                            avg_price_orig_row = df.filter(F.col(col) == 1).agg(
-                                F.avg("stock_price_original")
-                            ).first()
-                            avg_price_orig = avg_price_orig_row[0] if avg_price_orig_row else None
-                            logger.info(f"  {sector_name}: {avg_price_orig:.2f} (logged: {avg_price_logged:.4f})")
-                            sector_results.append((sector_name, avg_price_orig, avg_price_logged))
-                        else:
-                            logger.info(f"  {sector_name}: {avg_price_logged:.4f}")
-                            sector_results.append((sector_name, None, avg_price_logged))
-                except Exception as e:
-                    logger.warning(f"Failed to compute average for sector {col}: {e}")
+                    # Also compute original price average if available
+                    if 'stock_price_original' in df.columns:
+                        avg_price_orig = df.filter(F.col(col) == 1).agg(
+                            F.avg("stock_price_original")
+                        ).collect()[0][0]
+                        logger.info(f"  {sector_name}: {avg_price_orig:.2f} (logged: {avg_price_logged:.4f})")
+                        sector_results.append((sector_name, avg_price_orig, avg_price_logged))
+                    else:
+                        logger.info(f"  {sector_name}: {avg_price_logged:.4f}")
+                        sector_results.append((sector_name, None, avg_price_logged))
             
             # Create DataFrame from results
             if sector_results:
@@ -663,33 +651,23 @@ def run_spark_analytics_task(**context):
         
         # Q3: How many buy vs sell transactions occurred on weekends?
         logger.info("Q3: Buy vs Sell transactions on weekends")
-        try:
-            q3_result = (df.filter(F.col("is_weekend") == 1)
-                          .groupBy("transaction_type")
-                          .count()
-                          .orderBy("transaction_type"))
-            
-            # Check if result has data before collecting
-            q3_count = q3_result.count()
-            if q3_count > 0:
-                q3_result.show()
-                
-                # Pretty formatting - safer approach using first() with null checks
-                buy_row = q3_result.filter("transaction_type = 'BUY'").select("count").first()
-                sell_row = q3_result.filter("transaction_type = 'SELL'").select("count").first()
-                
-                buy_count = buy_row[0] if buy_row else 0
-                sell_count = sell_row[0] if sell_row else 0
-                
-                logger.info(f"  BUY on weekends:  {buy_count}")
-                logger.info(f"  SELL on weekends: {sell_count}")
-            else:
-                logger.info("  No weekend transactions found")
-                buy_count = sell_count = 0
-            
-            save_spark_result(q3_result, 'q3_weekend_transactions', 'spark_analytics_q3', engine)
-        except Exception as e:
-            logger.warning(f"Q3 query failed: {e}. Continuing with pipeline.")
+        q3_result = (df.filter(F.col("is_weekend") == 1)
+                      .groupBy("transaction_type")
+                      .count()
+                      .orderBy("transaction_type"))
+        q3_result.show()
+        
+        # Pretty formatting
+        buy_count_rows = q3_result.filter("transaction_type = 'BUY'").select("count").collect()
+        sell_count_rows = q3_result.filter("transaction_type = 'SELL'").select("count").collect()
+        
+        buy_count = buy_count_rows[0][0] if buy_count_rows else 0
+        sell_count = sell_count_rows[0][0] if sell_count_rows else 0
+        
+        logger.info(f"  BUY on weekends:  {buy_count}")
+        logger.info(f"  SELL on weekends: {sell_count}")
+        
+        save_spark_result(q3_result, 'q3_weekend_transactions', 'spark_analytics_q3', engine)
         
         # Q4: Which customers have made more than 10 transactions?
         logger.info("Q4: Customers with more than 10 transactions")
@@ -724,90 +702,64 @@ def run_spark_analytics_task(**context):
         
         # SQL Q1: What are the top 5 most traded stock tickers by total quantity?
         logger.info("SQL Q1: Top 5 most traded stock tickers")
-        try:
-            sql_q1_result = spark.sql("""
-                SELECT stock_ticker,
-                    SUM(quantity) AS total_quantity
-                FROM stocks
-                GROUP BY stock_ticker
-                ORDER BY total_quantity DESC
-                LIMIT 5
-            """)
-            sql_q1_result.show(truncate=False)
-            save_spark_result(sql_q1_result, 'sql_q1_top_5_stocks', 'spark_sql_q1', engine)
-        except Exception as e:
-            logger.warning(f"SQL Q1 query failed: {e}. Continuing with pipeline.")
+        sql_q1_result = spark.sql("""
+            SELECT stock_ticker,
+                SUM(quantity) AS total_quantity
+            FROM stocks
+            GROUP BY stock_ticker
+            ORDER BY total_quantity DESC
+            LIMIT 5
+        """)
+        sql_q1_result.show(truncate=False)
+        save_spark_result(sql_q1_result, 'sql_q1_top_5_stocks', 'spark_sql_q1', engine)
         
         # SQL Q2: What is the average trade amount by customer account type?
         logger.info("SQL Q2: Average trade amount by account type")
-        try:
-            sql_q2_result = spark.sql("""
-                SELECT customer_account_type,
-                    AVG(total_trade_amount) AS avg_trade_amount
-                FROM stocks
-                GROUP BY customer_account_type
-            """)
-            sql_q2_result.show(truncate=False)
-            save_spark_result(sql_q2_result, 'sql_q2_avg_by_account', 'spark_sql_q2', engine)
-        except Exception as e:
-            logger.warning(f"SQL Q2 query failed: {e}. Continuing with pipeline.")
+        sql_q2_result = spark.sql("""
+            SELECT customer_account_type,
+                AVG(total_trade_amount) AS avg_trade_amount
+            FROM stocks
+            GROUP BY customer_account_type
+        """)
+        sql_q2_result.show(truncate=False)
+        save_spark_result(sql_q2_result, 'sql_q2_avg_by_account', 'spark_sql_q2', engine)
         
         # SQL Q3: How many transactions occurred during holidays vs non-holidays?
         logger.info("SQL Q3: Transactions during holidays vs non-holidays")
-        try:
-            sql_q3_result = spark.sql("""
-                SELECT is_holiday,
-                    COUNT(*) AS transactions_count
-                FROM stocks
-                GROUP BY is_holiday
-            """)
-            sql_q3_result.show(truncate=False)
-            save_spark_result(sql_q3_result, 'sql_q3_holiday_comparison', 'spark_sql_q3', engine)
-        except Exception as e:
-            logger.warning(f"SQL Q3 query failed: {e}. Continuing with pipeline.")
+        sql_q3_result = spark.sql("""
+            SELECT is_holiday,
+                COUNT(*) AS transactions_count
+            FROM stocks
+            GROUP BY is_holiday
+        """)
+        sql_q3_result.show(truncate=False)
+        save_spark_result(sql_q3_result, 'sql_q3_holiday_comparison', 'spark_sql_q3', engine)
         
         # SQL Q4: Which stock sectors had the highest total trading volume on weekends?
         logger.info("SQL Q4: Weekend trading volume by sector")
-        try:
-            sql_q4_result = spark.sql("""
-                SELECT stock_sector,
-                    SUM(quantity) AS total_volume
-                FROM stocks
-                WHERE is_weekend = 1
-                GROUP BY stock_sector
-                ORDER BY total_volume DESC
-            """)
-            
-            # Check if result has data before showing/saving
-            q4_count = sql_q4_result.count()
-            if q4_count > 0:
-                sql_q4_result.show(truncate=False)
-                save_spark_result(sql_q4_result, 'sql_q4_weekend_sectors', 'spark_sql_q4', engine)
-            else:
-                logger.info("  No weekend trading data found. Skipping Q4.")
-                # Save empty result to maintain consistency
-                pandas_df = sql_q4_result.toPandas()
-                output_dir = os.path.join(OUTPUT_DIR, 'spark_results', 'sql_q4_weekend_sectors')
-                os.makedirs(output_dir, exist_ok=True)
-                pandas_df.to_csv(os.path.join(output_dir, 'part-00000.csv'), index=False)
-        except Exception as e:
-            logger.warning(f"SQL Q4 query failed: {e}. Continuing with pipeline.")
+        sql_q4_result = spark.sql("""
+            SELECT stock_sector,
+                SUM(quantity) AS total_volume
+            FROM stocks
+            WHERE is_weekend = 1
+            GROUP BY stock_sector
+            ORDER BY total_volume DESC
+        """)
+        sql_q4_result.show(truncate=False)
+        save_spark_result(sql_q4_result, 'sql_q4_weekend_sectors', 'spark_sql_q4', engine)
         
         # SQL Q5: What is the total buy vs sell amount for each stock liquidity tier?
         logger.info("SQL Q5: Buy vs Sell amount by liquidity tier")
-        try:
-            sql_q5_result = spark.sql("""
-                SELECT stock_liquidity_tier,
-                    SUM(CASE WHEN transaction_type = 'BUY' THEN total_trade_amount ELSE 0 END) AS buy_amount,
-                    SUM(CASE WHEN transaction_type = 'SELL' THEN total_trade_amount ELSE 0 END) AS sell_amount
-                FROM stocks
-                GROUP BY stock_liquidity_tier
-                ORDER BY stock_liquidity_tier
-            """)
-            sql_q5_result.show(truncate=False)
-            save_spark_result(sql_q5_result, 'sql_q5_liquidity_analysis', 'spark_sql_q5', engine)
-        except Exception as e:
-            logger.warning(f"SQL Q5 query failed: {e}. Continuing with pipeline.")
+        sql_q5_result = spark.sql("""
+            SELECT stock_liquidity_tier,
+                SUM(CASE WHEN transaction_type = 'BUY' THEN total_trade_amount ELSE 0 END) AS buy_amount,
+                SUM(CASE WHEN transaction_type = 'SELL' THEN total_trade_amount ELSE 0 END) AS sell_amount
+            FROM stocks
+            GROUP BY stock_liquidity_tier
+            ORDER BY stock_liquidity_tier
+        """)
+        sql_q5_result.show(truncate=False)
+        save_spark_result(sql_q5_result, 'sql_q5_liquidity_analysis', 'spark_sql_q5', engine)
         
         logger.info("✓ Spark analytics completed successfully")
         
@@ -826,25 +778,10 @@ def run_spark_analytics_task(**context):
         # Always stop Spark session to free resources
         try:
             if 'spark' in locals():
-                # Force cleanup of any cached data before stopping
-                try:
-                    spark.catalog.clearCache()
-                except:
-                    pass
-                
-                # Stop with error suppression for connection issues
-                import time
-                try:
-                    spark.stop()
-                    logger.info("Spark session stopped cleanly")
-                except Exception as stop_ex:
-                    # If connection already closed, that's fine
-                    logger.warning(f"Spark session stop encountered error (may be already closed): {stop_ex}")
-                    
-                # Give time for cleanup
-                time.sleep(2)
+                spark.stop()
+                logger.info("Spark session stopped")
         except Exception as stop_error:
-            logger.warning(f"Error during Spark session cleanup: {stop_error}")
+            logger.warning(f"Error stopping Spark session: {stop_error}")
 
 
 # =============================================================================
@@ -1114,95 +1051,120 @@ def start_streamlit_dashboard_task(**context):
 
 def process_with_ai_agent_task(**context):
     """
-    Task: Process natural language query using AI agent and generate SQL.
-    Reads from user_query.txt and appends to AGENT_LOGS.JSON.
+    Task: Process natural language query using AI agent (Gemini) and generate SQL.
+    Reads from user_query.txt and saves logs to agents/logs/ directory.
+    Simplified translation logs saved to AGENT_LOGS.JSON.
     """
-    logger.info("=== TASK: Process with AI Agent ===")
+    logger.info("=== TASK: Process with AI Agent (Gemini) ===")
     
-    # Read user query
-    query_file = os.path.join(AGENTS_DIR, 'user_query.txt')
-    
-    # Create default query if file doesn't exist
-    if not os.path.exists(query_file):
-        os.makedirs(AGENTS_DIR, exist_ok=True)
-        with open(query_file, 'w') as f:
-            f.write("What was the total trading volume for technology stocks last month?")
-    
-    with open(query_file, 'r') as f:
-        user_query = f.read().strip()
-    
-    logger.info(f"User query: {user_query}")
-    
-    # Get CSV columns
-    final_path = context['task_instance'].xcom_pull(key='final_stocks', task_ids='kafka_streaming.consume_and_process_stream')
-    df = pd.read_csv(final_path)
-    columns = df.columns.tolist()
-    columns_str = ", ".join(columns)
-    
-    # Create AI agent prompt
-    system_prompt = f"""You are an SQL query generator. Given a natural language question and CSV column names, generate a valid SQL query.
-    
-Available columns: {columns_str}
+    try:
+        # Import AI agent
+        from ai_agent import NL2SQLAgent, read_query_file
+        from db_utils import get_enhanced_table_context
+        
+        # Read user query
+        query_file = os.path.join(AGENTS_DIR, 'user_query.txt')
+        
+        # Create default query if file doesn't exist
+        if not os.path.exists(query_file):
+            os.makedirs(AGENTS_DIR, exist_ok=True)
+            with open(query_file, 'w') as f:
+                f.write("What was the total trading volume for technology stocks?")
+        
+        user_query = read_query_file(query_file)
+        logger.info(f"User query: {user_query}")
+        
+        # Get enhanced schema context with caching
+        enable_enhanced = os.getenv('ENABLE_ENHANCED_SCHEMA', 'true').lower() == 'true'
+        logger.info(f"Enhanced schema context: {'enabled' if enable_enhanced else 'disabled'}")
+        
+        context_data = get_enhanced_table_context(
+            'stock_trades_integrated',
+            include_statistics=enable_enhanced,
+            cache_ttl=300  # 5 minutes cache
+        )
+        
+        logger.info(f"Schema context source: {context_data.get('source')}")
+        logger.info(f"Row count: {context_data.get('row_count')}")
+        
+        # Initialize AI agent
+        agent = NL2SQLAgent()
+        
+        # Process query with AI agent
+        result = agent.process_query(user_query, context_data)
+        
+        if result['success']:
+            generated_sql = result['sql']
+            logger.info(f"✓ AI Agent generated SQL successfully")
+            logger.info(f"  SQL: {generated_sql}")
+            logger.info(f"  Execution time: {result['execution_time_ms']:.2f}ms")
+            logger.info(f"  Detailed log saved: {result.get('detailed_log_saved', False)}")
+            
+            # Push to XCom for downstream tasks
+            context['task_instance'].xcom_push(key='generated_sql', value=generated_sql)
+            context['task_instance'].xcom_push(key='user_query', value=user_query)
+            
+            return generated_sql
+        else:
+            error_msg = result.get('error', 'Unknown error')
+            logger.error(f"✗ AI Agent failed: {error_msg}")
+            
+            # Fallback to rule-based generator
+            logger.info("Attempting fallback to rule-based SQL generation...")
+            fallback_sql = generate_sql_query_fallback(user_query)
+            logger.info(f"Fallback SQL: {fallback_sql}")
+            
+            # Save fallback to simplified log
+            agent.save_translation_log(user_query, fallback_sql)
+            
+            context['task_instance'].xcom_push(key='generated_sql', value=fallback_sql)
+            context['task_instance'].xcom_push(key='user_query', value=user_query)
+            
+            return fallback_sql
+            
+    except Exception as e:
+        logger.error(f"Fatal error in AI agent task: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        
+        # Ultimate fallback
+        fallback_sql = "SELECT stock_sector, SUM(quantity) as total_volume FROM stock_trades_integrated GROUP BY stock_sector ORDER BY total_volume DESC LIMIT 10"
+        logger.info(f"Using ultimate fallback SQL: {fallback_sql}")
+        
+        return fallback_sql
 
-Generate ONLY the SQL query without any explanation. The table name is 'stocks'."""
-    
-    # Simple AI agent (using placeholder - replace with actual LLM)
-    # For demonstration, using a rule-based approach
-    # In production, replace with OpenAI, HuggingFace, or Ollama
-    
-    generated_sql = generate_sql_query(user_query, columns)
-    
-    # Create agent log entry
-    log_entry = {
-        "timestamp": datetime.now().isoformat(),
-        "user_query": user_query,
-        "columns_available": columns,
-        "generated_sql": generated_sql,
-        "status": "success"
-    }
-    
-    # Append to AGENT_LOGS.JSON
-    logs_file = os.path.join(AGENTS_DIR, 'AGENT_LOGS.JSON')
-    
-    if os.path.exists(logs_file):
-        with open(logs_file, 'r') as f:
-            logs = json.load(f)
-    else:
-        logs = []
-    
-    logs.append(log_entry)
-    
-    with open(logs_file, 'w') as f:
-        json.dump(logs, f, indent=2)
-    
-    logger.info(f"✓ AI Agent processed query successfully")
-    logger.info(f"  Generated SQL: {generated_sql}")
 
-
-def generate_sql_query(user_query, columns):
+def generate_sql_query_fallback(user_query):
     """
-    Simple rule-based SQL generator (replace with actual LLM in production).
+    Fallback rule-based SQL generator when AI agent fails.
+    Simple pattern matching for common queries.
     """
     query_lower = user_query.lower()
     
     # Pattern matching for common queries
     if 'total' in query_lower and 'volume' in query_lower:
         if 'technology' in query_lower or 'tech' in query_lower:
-            return "SELECT SUM(quantity) as total_volume FROM stocks WHERE stock_sector = 'Technology'"
+            return "SELECT SUM(quantity) as total_volume FROM stock_trades_integrated WHERE stock_sector = 'Technology'"
         else:
-            return "SELECT stock_ticker, SUM(quantity) as total_volume FROM stocks GROUP BY stock_ticker"
+            return "SELECT stock_ticker, SUM(quantity) as total_volume FROM stock_trades_integrated GROUP BY stock_ticker ORDER BY total_volume DESC LIMIT 20"
     
     elif 'average' in query_lower or 'avg' in query_lower:
         if 'price' in query_lower:
-            return "SELECT stock_sector, AVG(stock_price) as avg_price FROM stocks GROUP BY stock_sector"
+            return "SELECT stock_sector, AVG(stock_price) as avg_price FROM stock_trades_integrated GROUP BY stock_sector ORDER BY avg_price DESC"
         elif 'trade' in query_lower or 'amount' in query_lower:
-            return "SELECT customer_account_type, AVG(total_trade_amount) as avg_amount FROM stocks GROUP BY customer_account_type"
+            return "SELECT customer_account_type, AVG(total_trade_amount) as avg_amount FROM stock_trades_integrated GROUP BY customer_account_type"
     
     elif 'top' in query_lower:
         if 'customer' in query_lower:
-            return "SELECT customer_id, SUM(total_trade_amount) as total_trades FROM stocks GROUP BY customer_id ORDER BY total_trades DESC LIMIT 10"
+            return "SELECT customer_id, SUM(total_trade_amount) as total_trades FROM stock_trades_integrated GROUP BY customer_id ORDER BY total_trades DESC LIMIT 10"
         elif 'stock' in query_lower:
-            return "SELECT stock_ticker, SUM(quantity) as total_volume FROM stocks GROUP BY stock_ticker ORDER BY total_volume DESC LIMIT 10"
+            return "SELECT stock_ticker, SUM(quantity) as total_volume FROM stock_trades_integrated GROUP BY stock_ticker ORDER BY total_volume DESC LIMIT 10"
+    
+    elif 'weekend' in query_lower:
+        return "SELECT transaction_type, COUNT(*) as count FROM stock_trades_integrated WHERE is_weekend = true GROUP BY transaction_type"
+    
+    elif 'holiday' in query_lower:
+        return "SELECT COUNT(*) as holiday_trades FROM stock_trades_integrated WHERE is_holiday = true"
     
     # Default query
-    return "SELECT * FROM stocks LIMIT 100"
+    return "SELECT stock_sector, COUNT(*) as transaction_count, SUM(total_trade_amount) as total_amount FROM stock_trades_integrated GROUP BY stock_sector ORDER BY total_amount DESC LIMIT 10"

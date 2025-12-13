@@ -404,3 +404,149 @@ def drop_table(table_name: str, cascade: bool = False) -> None:
     except psycopg2.Error as e:
         logger.error(f"Error dropping table: {e}")
         raise
+
+
+def get_enhanced_table_context(table_name: str, include_statistics: bool = True, cache_ttl: int = 300) -> dict:
+    """
+    Get enhanced table context with schema and optional statistics for AI agent.
+    Implements caching with TTL and fallback to static schema.
+    
+    Args:
+        table_name: Name of the table to analyze
+        include_statistics: Whether to include column statistics (default: True)
+        cache_ttl: Cache time-to-live in seconds (default: 300 = 5 minutes)
+    
+    Returns:
+        dict: Enhanced context with schema, statistics, and metadata
+    """
+    import time
+    from schema_config import get_static_schema_context
+    
+    # Simple in-memory cache with timestamp
+    cache_key = f"{table_name}_{include_statistics}"
+    cache_store = getattr(get_enhanced_table_context, '_cache', {})
+    
+    # Check cache
+    if cache_key in cache_store:
+        cached_data, timestamp = cache_store[cache_key]
+        if time.time() - timestamp < cache_ttl:
+            logger.info(f"Using cached schema context for {table_name}")
+            cached_data['source'] = 'cache'
+            return cached_data
+    
+    try:
+        conn = get_psycopg2_connection()
+        cursor = conn.cursor()
+        
+        # Get basic schema information
+        cursor.execute("""
+            SELECT column_name, data_type, is_nullable, column_default,
+                   character_maximum_length
+            FROM information_schema.columns 
+            WHERE table_name = %s
+            ORDER BY ordinal_position
+        """, (table_name,))
+        
+        columns_raw = cursor.fetchall()
+        
+        # Get row count
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+        row_count = cursor.fetchone()[0]
+        
+        # Build schema structure
+        columns = []
+        for col in columns_raw:
+            col_info = {
+                'name': col[0],
+                'type': col[1],
+                'nullable': col[2] == 'YES',
+                'default': col[3],
+                'max_length': col[4]
+            }
+            columns.append(col_info)
+        
+        schema_info = {
+            'table_name': table_name,
+            'columns': columns
+        }
+        
+        # Get statistics if requested
+        statistics = {}
+        if include_statistics:
+            logger.info(f"Gathering statistics for {table_name}...")
+            
+            for col_info in columns:
+                col_name = col_info['name']
+                col_type = col_info['type']
+                
+                try:
+                    # Get unique count and null count
+                    cursor.execute(f"""
+                        SELECT 
+                            COUNT(DISTINCT "{col_name}") as unique_count,
+                            COUNT(*) FILTER (WHERE "{col_name}" IS NULL) as null_count
+                        FROM {table_name}
+                    """)
+                    unique_count, null_count = cursor.fetchone()
+                    
+                    col_stats = {
+                        'unique_values': unique_count,
+                        'null_count': null_count
+                    }
+                    
+                    # Get top 5 most common values for categorical columns
+                    if col_type in ['character varying', 'varchar', 'text', 'boolean']:
+                        cursor.execute(f"""
+                            SELECT "{col_name}", COUNT(*) as freq
+                            FROM {table_name}
+                            WHERE "{col_name}" IS NOT NULL
+                            GROUP BY "{col_name}"
+                            ORDER BY freq DESC
+                            LIMIT 5
+                        """)
+                        common_values = [row[0] for row in cursor.fetchall()]
+                        col_stats['common_values'] = common_values
+                    
+                    # Get min/max for numeric columns
+                    elif col_type in ['integer', 'bigint', 'numeric', 'double precision', 'real']:
+                        cursor.execute(f"""
+                            SELECT MIN("{col_name}"), MAX("{col_name}")
+                            FROM {table_name}
+                            WHERE "{col_name}" IS NOT NULL
+                        """)
+                        min_val, max_val = cursor.fetchone()
+                        col_stats['min'] = min_val
+                        col_stats['max'] = max_val
+                    
+                    statistics[col_name] = col_stats
+                    
+                except Exception as col_error:
+                    logger.warning(f"Could not get statistics for column {col_name}: {col_error}")
+                    continue
+        
+        cursor.close()
+        conn.close()
+        
+        # Build result
+        result = {
+            'schema': schema_info,
+            'statistics': statistics,
+            'row_count': row_count,
+            'source': 'database',
+            'last_updated': time.time()
+        }
+        
+        # Update cache
+        if not hasattr(get_enhanced_table_context, '_cache'):
+            get_enhanced_table_context._cache = {}
+        get_enhanced_table_context._cache[cache_key] = (result, time.time())
+        
+        logger.info(f"Successfully retrieved enhanced context for {table_name}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error getting enhanced table context: {e}")
+        logger.info("Falling back to static schema configuration")
+        
+        # Fallback to static schema
+        return get_static_schema_context()
