@@ -35,7 +35,8 @@ from dag_tasks import (
     start_streamlit_dashboard_task,
     
     # Stage 6: AI Agent
-    process_with_ai_agent_task
+    process_with_ai_agent_task,
+    start_ai_query_interface_task
 )
 
 # Default arguments
@@ -146,36 +147,13 @@ with DAG(
         )
         
         # Launch AI Query Interface (Streamlit on port 8502)
-        # This runs in parallel to allow interactive query submission
-        launch_query_interface = BashOperator(
+        # This runs after AI agent processing to allow interactive query submission
+        launch_query_interface = PythonOperator(
             task_id='launch_query_interface',
-            bash_command="""
-            # Kill any existing Streamlit process on port 8502
-            pkill -f 'streamlit run.*ai_query_interface.py' || true
-            sleep 2
-            
-            # Start Streamlit AI Query Interface in background
-            streamlit run /opt/airflow/src/ai_query_interface.py \
-                --server.port 8502 \
-                --server.address 0.0.0.0 \
-                --server.headless true \
-                --server.enableCORS false \
-                --server.enableXsrfProtection false \
-                > /opt/airflow/logs/ai_query_interface.log 2>&1 &
-            
-            # Wait for startup
-            sleep 5
-            
-            # Check if process started
-            if pgrep -f 'streamlit run.*ai_query_interface.py' > /dev/null; then
-                echo "AI Query Interface started successfully on port 8502"
-                exit 0
-            else
-                echo "Failed to start AI Query Interface"
-                exit 1
-            fi
-            """,
+            python_callable=start_ai_query_interface_task,
         )
+        
+        launch_query_interface >> process_with_ai_agent 
 
 
 # Stages Dependencies
