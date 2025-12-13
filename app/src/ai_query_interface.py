@@ -61,7 +61,7 @@ with st.sidebar:
     
     st.header("ℹ️ Info")
     st.markdown("""
-    **Model**: Gemini 2.0 Flash
+    **Model**: Gemini 2.5 Flash
     
     **Table**: `stock_trades_integrated`
     
@@ -286,4 +286,4 @@ with tab3:
 
 # Footer
 st.divider()
-st.caption("💡 Powered by Google Gemini 2.0 Flash | Stock Portfolio Analytics Platform")
+st.caption("💡 Powered by Google Gemini 2.5 Flash | Stock Portfolio Analytics Platform")

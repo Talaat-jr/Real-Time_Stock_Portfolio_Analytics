@@ -18,8 +18,25 @@ import sqlparse
 import google.generativeai as genai
 
 # LangChain imports
-from langchain.agents import tool, AgentExecutor, create_react_agent
-from langchain.prompts import PromptTemplate
+# Note: tool decorator moved in LangChain 0.1.0+ to langchain_core.tools
+try:
+    from langchain_core.tools import tool
+except ImportError:
+    try:
+        from langchain.tools import tool
+    except ImportError:
+        # Fallback: try old location (pre-0.1.0)
+        try:
+            from langchain.agents import tool
+        except ImportError:
+            # Last resort: create a dummy decorator
+            def tool(func):
+                """Dummy tool decorator if LangChain tools aren't available"""
+                return func
+
+# PromptTemplate is not used in this code (using f-strings instead)
+# from langchain.prompts import PromptTemplate
+
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Database utilities
@@ -77,7 +94,7 @@ class NL2SQLAgent:
         
         # Initialize LangChain Gemini model
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash",
             google_api_key=self.api_key,
             temperature=0.1,
             max_retries=3
@@ -87,7 +104,7 @@ class NL2SQLAgent:
         self.max_retries = 3
         self.tools = self._create_tools()
         
-        logger.info("NL2SQL Agent initialized with Gemini 2.0 Flash")
+        logger.info("NL2SQL Agent initialized with Gemini 2.5 Flash")
     
     def _create_tools(self) -> List:
         """Create LangChain tools for the agent."""
@@ -407,7 +424,7 @@ SQL Query:"""
                 "timestamp": datetime.now().isoformat(),
                 "user_query": user_query,
                 "generated_sql": sql,
-                "model": "gemini-2.0-flash-exp",
+                "model": "gemini-2.5-flash",
                 "execution_time_ms": execution_time,
                 "enhanced_context_used": enhanced_context.get('source') == 'database',
                 "cache_hit": enhanced_context.get('source') == 'cache',
@@ -434,7 +451,7 @@ SQL Query:"""
                 "timestamp": datetime.now().isoformat(),
                 "user_query": user_query,
                 "error": str(e),
-                "model": "gemini-2.0-flash-exp",
+                "model": "gemini-2.5-flash",
                 "execution_time_ms": execution_time,
                 "status": "failed"
             }
