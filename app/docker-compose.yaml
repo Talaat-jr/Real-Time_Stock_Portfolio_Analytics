@@ -1,5 +1,51 @@
 version: '3.8'
 
+# ============================================================================
+# AIRFLOW COMMON CONFIGURATION
+# ============================================================================
+x-airflow-common:
+  &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+  env_file:
+    - .env
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@airflow-db:5432/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # Stock database connection for tasks (override .env if needed)
+    POSTGRES_HOST: postgres
+    # Kafka connection
+    KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    # Spark connection
+    SPARK_MASTER_URL: spark://spark-master:7077
+    IN_DOCKER: "true"
+  volumes:
+    - ./src/dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./config:/opt/airflow/config
+    - ./plugins:/opt/airflow/plugins
+    - ./output:/opt/airflow/output
+    - ./src:/opt/airflow/src
+    - ./data:/opt/airflow/data:ro
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    redis:
+      condition: service_healthy
+    airflow-db:
+      condition: service_healthy
+  networks:
+    - stock_network
+
 services:
   # ------------------------------------------------------------------
   # CORE DATABASE SERVICES
@@ -50,6 +96,45 @@ services:
       - stock_network
     restart: unless-stopped
 
+  # Airflow PostgreSQL Database
+  airflow-db:
+    image: postgres:16-alpine
+    container_name: stock_airflow_db
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    ports:
+      - "5433:5432"
+    volumes:
+      - airflow_postgres_data:/var/lib/postgresql/data
+    networks:
+      - stock_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis (for Airflow Celery)
+  redis:
+    image: redis:7.2-bookworm
+    container_name: stock_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - stock_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 30s
+      retries: 50
+      start_period: 30s
+    restart: unless-stopped
+
   # ------------------------------------------------------------------
   # STREAMING AND COMPUTATION SERVICES
   # ------------------------------------------------------------------
@@ -92,13 +177,13 @@ services:
     user: root
     command: >
       bash -c "
-        mkdir -p /tmp/spark-logs /opt/spark/data /opt/spark/jobs /opt/spark/data/spark_results &&
-        chmod -R 777 /opt/spark/data &&
+        mkdir -p /tmp/spark-logs /opt/spark/data /opt/spark/jobs /opt/spark/data/spark_results /opt/airflow/output &&
+        chmod -R 777 /opt/spark/data /opt/airflow/output &&
         /usr/local/spark/sbin/start-master.sh &&
         tail -f /tmp/spark-logs/* || tail -f /dev/null
       "
     ports:
-      - "${SPARK_MASTER_WEBUI_PORT:-8080}:8080" # Spark Web UI
+      - "${SPARK_MASTER_WEBUI_PORT:-8083}:8080" # Spark Web UI
       - "${SPARK_MASTER_PORT:-7077}:7077" # Spark Master port
     environment:
       - SPARK_NO_DAEMONIZE=true
@@ -108,6 +193,7 @@ services:
       - SPARK_MASTER_WEBUI_PORT=8080
     volumes:
       - ./output:/opt/spark/data
+      - ./output:/opt/airflow/output  # Add Airflow-compatible path
       - ./src/spark_jobs:/opt/spark/jobs
     networks:
       - stock_network
@@ -120,8 +206,8 @@ services:
     user: root
     command: >
       bash -c "
-        mkdir -p /tmp/spark-logs /tmp/spark-work /opt/spark/data/spark_results &&
-        chmod -R 777 /opt/spark/data &&
+        mkdir -p /tmp/spark-logs /tmp/spark-work /opt/spark/data/spark_results /opt/airflow/output &&
+        chmod -R 777 /opt/spark/data /opt/airflow/output &&
         /usr/local/spark/sbin/start-worker.sh spark://spark-master:7077 &&
         tail -f /tmp/spark-logs/* || tail -f /dev/null
       "
@@ -139,6 +225,7 @@ services:
       - SPARK_MASTER=spark://spark-master:7077
     volumes:
       - ./output:/opt/spark/data
+      - ./output:/opt/airflow/output  # Add Airflow-compatible path
       - ./src/spark_jobs:/opt/spark/jobs
       - ./output:/home/jovyan/output
     networks:
@@ -221,6 +308,106 @@ services:
     command: tail -f /dev/null
     restart: on-failure
 
+  # ------------------------------------------------------------------
+  # AIRFLOW SERVICES (Orchestration)
+  # ------------------------------------------------------------------
+
+  # Airflow Init
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /sources/logs /sources/plugins /sources/config /sources/src/dags
+        chown -R "${AIRFLOW_UID:-50000}:0" /sources/{logs,plugins,config}
+        chown -R "${AIRFLOW_UID:-50000}:0" /sources/src/dags
+        chmod -R 775 /sources/{logs,plugins,config} /sources/src/dags
+        exec /entrypoint airflow version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+      _PIP_ADDITIONAL_REQUIREMENTS: ''
+    user: "0:0"
+    volumes:
+      - ${AIRFLOW_PROJ_DIR:-.}:/sources
+
+  # Airflow Webserver (UI)
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: stock_airflow_webserver
+    command: webserver
+    ports:
+      - "8082:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+  # Airflow Scheduler
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: stock_airflow_scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # Airflow Worker (Celery)
+  airflow-worker:
+    <<: *airflow-common
+    container_name: stock_airflow_worker
+    command: celery worker
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - 'celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}" || celery --app airflow.executors.celery_executor.app inspect ping -d "celery@$${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    environment:
+      <<: *airflow-common-env
+      DUMB_INIT_SETSID: "0"
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+  # Airflow Triggerer
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: stock_airflow_triggerer
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
 # ------------------------------------------------------------------
 # VOLUMES AND NETWORKS
 # ------------------------------------------------------------------
@@ -229,6 +416,10 @@ volumes:
   postgres_data:
     driver: local
   pgadmin_data:
+    driver: local
+  airflow_postgres_data:
+    driver: local
+  redis_data:
     driver: local
 
 networks:
