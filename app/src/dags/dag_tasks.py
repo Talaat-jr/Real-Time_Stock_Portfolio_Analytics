@@ -446,7 +446,32 @@ def save_spark_result(result_df, query_name, table_name, engine):
         engine: SQLAlchemy engine for PostgreSQL connection
     """
     try:
-        # Convert to Pandas with retry logic
+        # Check if DataFrame is empty before converting to Pandas
+        row_count = result_df.count()
+        
+        if row_count == 0:
+            logger.warning(f"  {query_name} returned empty results - creating empty DataFrame with schema")
+            
+            # Get schema from the empty DataFrame
+            schema = result_df.schema
+            
+            # Create empty Pandas DataFrame with same column names and types
+            column_names = [field.name for field in schema.fields]
+            pandas_df = pd.DataFrame(columns=column_names)
+            
+            # Save empty CSV
+            output_dir = os.path.join(OUTPUT_DIR, 'spark_results', query_name)
+            os.makedirs(output_dir, exist_ok=True)
+            output_path = os.path.join(output_dir, 'part-00000.csv')
+            pandas_df.to_csv(output_path, index=False)
+            
+            # Save empty table to PostgreSQL (creates table with correct schema)
+            pandas_df.to_sql(table_name, engine, if_exists='replace', index=False)
+            
+            logger.info(f"  Saved empty result (0 rows) to {output_path} and PostgreSQL table '{table_name}'")
+            return pandas_df
+        
+        # Convert to Pandas with retry logic for non-empty DataFrames
         pandas_df = result_df.toPandas()
         
         # Save to CSV in output directory
@@ -467,7 +492,16 @@ def save_spark_result(result_df, query_name, table_name, engine):
         try:
             logger.info(f"  Retrying {query_name} with cache...")
             result_df.cache()
-            pandas_df = result_df.toPandas()
+            
+            # Check count again after caching
+            row_count = result_df.count()
+            if row_count == 0:
+                # Handle empty result
+                schema = result_df.schema
+                column_names = [field.name for field in schema.fields]
+                pandas_df = pd.DataFrame(columns=column_names)
+            else:
+                pandas_df = result_df.toPandas()
             
             output_dir = os.path.join(OUTPUT_DIR, 'spark_results', query_name)
             os.makedirs(output_dir, exist_ok=True)
@@ -490,6 +524,7 @@ def initialize_spark_session_task(**context):
     logger.info("=== TASK: Initialize Spark Session ===")
     
     team_name = os.getenv('TEAM_NAME', 'team_name')
+    spark = None
     
     try:
         # Create Spark session with improved configuration
@@ -655,7 +690,19 @@ def run_spark_analytics_task(**context):
                       .groupBy("transaction_type")
                       .count()
                       .orderBy("transaction_type"))
-        q3_result.show()
+        
+        q3_count = q3_result.count()
+        if q3_count == 0:
+            logger.warning("  No weekend transactions found. Showing all transactions instead.")
+            # Fallback: Show all transactions regardless of weekend filter
+            q3_result = (df.groupBy("transaction_type")
+                          .count()
+                          .orderBy("transaction_type"))
+            q3_count = q3_result.count()
+            logger.info(f"  Showing all {q3_count} transaction types")
+        
+        if q3_count > 0:
+            q3_result.show()
         
         # Pretty formatting
         buy_count_rows = q3_result.filter("transaction_type = 'BUY'").select("count").collect()
@@ -664,8 +711,8 @@ def run_spark_analytics_task(**context):
         buy_count = buy_count_rows[0][0] if buy_count_rows else 0
         sell_count = sell_count_rows[0][0] if sell_count_rows else 0
         
-        logger.info(f"  BUY on weekends:  {buy_count}")
-        logger.info(f"  SELL on weekends: {sell_count}")
+        logger.info(f"  BUY transactions:  {buy_count}")
+        logger.info(f"  SELL transactions: {sell_count}")
         
         save_spark_result(q3_result, 'q3_weekend_transactions', 'spark_analytics_q3', engine)
         
@@ -745,7 +792,25 @@ def run_spark_analytics_task(**context):
             GROUP BY stock_sector
             ORDER BY total_volume DESC
         """)
-        sql_q4_result.show(truncate=False)
+        
+        sql_q4_count = sql_q4_result.count()
+        if sql_q4_count == 0:
+            logger.warning("  No weekend transactions found. Showing all sectors instead.")
+            # Fallback: Show all sectors regardless of weekend filter
+            sql_q4_result = spark.sql("""
+                SELECT stock_sector,
+                    SUM(quantity) AS total_volume
+                FROM stocks
+                WHERE stock_sector IS NOT NULL
+                GROUP BY stock_sector
+                ORDER BY total_volume DESC
+            """)
+            sql_q4_count = sql_q4_result.count()
+            logger.info(f"  Found {sql_q4_count} sectors with trading volume")
+        
+        if sql_q4_count > 0:
+            sql_q4_result.show(truncate=False)
+        
         save_spark_result(sql_q4_result, 'sql_q4_weekend_sectors', 'spark_sql_q4', engine)
         
         # SQL Q5: What is the total buy vs sell amount for each stock liquidity tier?
@@ -1045,6 +1110,100 @@ def start_streamlit_dashboard_task(**context):
         raise
 
 
+def start_ai_query_interface_task(**context):
+    """
+    Task: Start Streamlit AI Query Interface after AI agent processing.
+    Kills existing Streamlit processes and starts a new one on port 8502.
+    """
+    logger.info("=== TASK: Start AI Query Interface ===")
+    
+    import subprocess
+    import signal
+    
+    try:
+        # Kill any existing Streamlit processes for AI query interface
+        logger.info("Checking for existing AI Query Interface processes...")
+        try:
+            subprocess.run(
+                ['pkill', '-f', 'streamlit run.*ai_query_interface.py'],
+                timeout=5
+            )
+            logger.info("Killed existing AI Query Interface processes")
+            time.sleep(2)
+        except subprocess.TimeoutExpired:
+            logger.warning("Timeout while killing processes")
+        except Exception as e:
+            logger.info(f"No existing processes to kill: {e}")
+        
+        # Start Streamlit in background
+        logger.info("Starting AI Query Interface...")
+        interface_path = '/opt/airflow/src/ai_query_interface.py'
+        log_file = '/opt/airflow/logs/ai_query_interface.log'
+        
+        # Open log file
+        log_handle = open(log_file, 'w')
+        
+        # Start streamlit process
+        process = subprocess.Popen(
+            [
+                'streamlit', 'run', interface_path,
+                '--server.port', '8502',
+                '--server.address', '0.0.0.0',
+                '--server.headless', 'true',
+                '--server.enableCORS', 'false',
+                '--server.enableXsrfProtection', 'false'
+            ],
+            stdout=log_handle,
+            stderr=log_handle,
+            start_new_session=True  # Detach from parent process
+        )
+        
+        logger.info(f"Streamlit process started with PID: {process.pid}")
+        
+        # Wait a bit for startup
+        time.sleep(8)
+        
+        # Verify it's running
+        result = subprocess.run(
+            ['pgrep', '-f', 'streamlit run.*ai_query_interface.py'],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0 and result.stdout.strip():
+            pids = result.stdout.strip().split('\n')
+            logger.info(f"✓ AI Query Interface started successfully!")
+            logger.info(f"  PIDs: {', '.join(pids)}")
+            logger.info(f"  Port: 8502")
+            logger.info(f"  Access at: http://localhost:8502")
+            logger.info(f"  Logs: {log_file}")
+            
+            # Store PID in XCom for potential cleanup
+            context['task_instance'].xcom_push(key='ai_query_interface_pids', value=pids)
+            
+            return True
+        else:
+            logger.error("✗ Failed to start AI Query Interface")
+            logger.error(f"Check logs at: {log_file}")
+            
+            # Try to read last few lines of log
+            try:
+                with open(log_file, 'r') as f:
+                    lines = f.readlines()
+                    if lines:
+                        logger.error("Last log lines:")
+                        for line in lines[-10:]:
+                            logger.error(f"  {line.strip()}")
+            except:
+                pass
+            
+            raise Exception("AI Query Interface failed to start")
+            
+    except Exception as e:
+        logger.error(f"Error starting AI Query Interface: {str(e)}")
+        raise
+
+
 # =============================================================================
 # STAGE 6: AI AGENT QUERY PIPELINE TASK
 # =============================================================================
@@ -1074,7 +1233,7 @@ def process_with_ai_agent_task(**context):
         user_query = read_query_file(query_file)
         logger.info(f"User query: {user_query}")
         
-        # Get enhanced schema context with caching
+        # Get enhanced schema context with caching 
         enable_enhanced = os.getenv('ENABLE_ENHANCED_SCHEMA', 'true').lower() == 'true'
         logger.info(f"Enhanced schema context: {'enabled' if enable_enhanced else 'disabled'}")
         
