@@ -40,7 +40,7 @@ from dag_tasks import (
 
 # Default arguments
 default_args = {
-    'owner': 'data_engineering_team',
+    'owner': 'data_engineering_AA',
     'depends_on_past': False,
     'start_date': datetime(2025, 12, 9),  # Yesterday
     'email_on_failure': False,
@@ -50,7 +50,7 @@ default_args = {
 }
 
 with DAG(
-    'stock_portfolio_pipeline_team_name',
+    'stock_portfolio_pipeline_AA',
     default_args=default_args,
     description='End-to-end stock portfolio analytics pipeline',
     schedule_interval='@daily',

@@ -282,8 +282,8 @@ services:
         condition: service_started
     networks:
       - stock_network
-    command: python src/app.py
-    # command: tail -f /dev/null
+    # command: python src/app.py
+    command: tail -f /dev/null
     restart: on-failure
 
   # Kafka Producer Service
