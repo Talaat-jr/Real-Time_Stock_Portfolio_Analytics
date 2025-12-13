@@ -31,3 +31,6 @@ wheels/
 # Output
 *.crc
 _SUCCESS
+
+output/
+logs/

@@ -41,7 +41,11 @@ def read_file(file_path):
     Returns:
         pd.DataFrame: Loaded dataframe
     """
-    datasets_dir = 'data/'
+    # Check if running in Docker (Airflow) or locally
+    if os.getenv('IN_DOCKER'):
+        datasets_dir = '/opt/airflow/data/'
+    else:
+        datasets_dir = 'data/'
     full_path = datasets_dir + file_path
     
     if full_path.endswith('.csv'):
