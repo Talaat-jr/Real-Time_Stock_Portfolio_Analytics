@@ -124,7 +124,15 @@ def handle_outliers(df, method='cap', threshold=0.1, multiplier=1.5):
                 # Replace outliers with NaN and interpolate
                 df_clean.loc[outlier_mask, col] = np.nan
                 df_clean[col] = df_clean[col].interpolate(method='linear').fillna(method='bfill').fillna(method='ffill')
-            
+            elif method == 'log':
+                df_clean[col] = np.log1p(df_clean[col])
+            elif method == 'zscore':
+                # Standardize the column using z-score normalization
+                print(f"Standardizing {col} using z-score normalization")
+                mean = df_clean[col].mean()
+                std = df_clean[col].std()
+                print(f"Mean: {mean}, Std: {std}")
+                df_clean[col] = (df_clean[col] - mean) / std
             logger.info(f"  - {col}: {outlier_count} outliers ({outlier_proportion*100:.2f}%) handled")
     
     logger.info(f"Outlier handling complete: {total_outliers_handled} outliers in {columns_processed} columns")
@@ -247,6 +255,22 @@ def integrate_data():
     return merged_df
 
 
+def reverse_transformations(df, mean, std):
+    """
+    Reverse the transformations applied to the data.
+    
+    Args:
+        df: DataFrame to reverse transformations
+        mean: Mean of the data
+        std: Standard deviation of the data
+    """
+    logger.info("Reversing transformations of stock_price and average_trade_size")
+    df.loc[df['stock_ticker'] == 'STK001', 'stock_price'] = np.expm1(df.loc[df['stock_ticker'] == 'STK001', 'stock_price'])
+    df['average_trade_size'] = (df['average_trade_size'] * std) + mean
+    logger.info("Reversed transformations of stock_price and average_trade_size")
+    return df
+
+
 def split_for_streaming(df, stream_percentage=0.05):
     """
     Split dataframe into training (95%) and streaming (5%) sets.
@@ -360,12 +384,15 @@ def main():
         
         # Step 1: Load data
         load_data()
+
+        avg_trade_size_mean = trades_df['average_trade_size'].mean()
+        avg_trade_size_std = trades_df['average_trade_size'].std()
         
         # Step 2: Clean data
         logger.info("\n--- Data Cleaning ---")
         cleaned_daily_trade_prices_df = handle_outliers(
             daily_trade_prices_df, 
-            method='cap', 
+            method='log', 
             threshold=0.1
         )
         cleaned_daily_trade_prices_df = handle_missing_values(
@@ -375,14 +402,14 @@ def main():
         
         trades_df = handle_outliers(
             trades_df, 
-            method='cap', 
+            method='zscore', 
             threshold=0.2
         )
         
         # Step 3: Integrate data
         logger.info("\n--- Data Integration ---")
         merged_df = integrate_data()
-        
+        merged_df = reverse_transformations(merged_df, avg_trade_size_mean, avg_trade_size_std)
         # Step 4: Split for streaming (BEFORE encoding)
         logger.info("\n--- Streaming Preparation ---")
         main_df, stream_df = split_for_streaming(merged_df, stream_percentage=0.05)
