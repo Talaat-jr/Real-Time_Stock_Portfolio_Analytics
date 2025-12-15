@@ -102,11 +102,13 @@ def detect_outliers_task(**context):
     
     # Also handle outliers in trades.csv using your original function
     trades_df = read_file('trades.csv')
+    avg_trade_size_mean = trades_df['average_trade_size'].mean()
+    avg_trade_size_std = trades_df['average_trade_size'].std()
     
     # Use YOUR original handle_outliers function
-    df_clean = handle_outliers(df, method='cap', threshold=0.1)
-    trades_clean = handle_outliers(trades_df, method='cap', threshold=0.2)
-    
+    df_clean = handle_outliers(df, method='log', threshold=0.1)
+    trades_clean = handle_outliers(trades_df, method='zscore', threshold=0.2)
+
     # Save cleaned data
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     df_clean.to_csv(os.path.join(OUTPUT_DIR, 'cleaned_daily_trade_prices.csv'), index=False)
@@ -115,6 +117,8 @@ def detect_outliers_task(**context):
     # Push to XCom
     context['task_instance'].xcom_push(key='cleaned_prices_final', value=os.path.join(OUTPUT_DIR, 'cleaned_daily_trade_prices.csv'))
     context['task_instance'].xcom_push(key='cleaned_trades', value=os.path.join(OUTPUT_DIR, 'cleaned_trades.csv'))
+    context['task_instance'].xcom_push(key='avg_trade_size_mean', value=avg_trade_size_mean)
+    context['task_instance'].xcom_push(key='avg_trade_size_std', value=avg_trade_size_std)
     
     logger.info("✓ Outliers detected and handled successfully")
 
@@ -129,6 +133,8 @@ def integrate_datasets_task(**context):
     # Load the cleaned files from previous tasks
     trades_path = context['task_instance'].xcom_pull(key='cleaned_trades', task_ids='data_cleaning_integration.detect_outliers')
     prices_path = context['task_instance'].xcom_pull(key='cleaned_prices_final', task_ids='data_cleaning_integration.detect_outliers')
+    avg_trade_size_mean = context['task_instance'].xcom_pull(key='avg_trade_size_mean', task_ids='data_cleaning_integration.detect_outliers')
+    avg_trade_size_std = context['task_instance'].xcom_pull(key='avg_trade_size_std', task_ids='data_cleaning_integration.detect_outliers')
     
     # Load datasets
     trades_df = pd.read_csv(trades_path)
@@ -139,7 +145,7 @@ def integrate_datasets_task(**context):
     
     logger.info(f"Loaded datasets - Trades: {len(trades_df)}, Prices: {len(cleaned_daily_trade_prices_df)}")
     logger.info(f"  - Customers: {len(dim_customer_df)}, Stocks: {len(dim_stock_df)}, Dates: {len(dim_date_df)}")
-    
+
     # Melt daily prices from wide to long format
     melted_daily_trade_prices_df = pd.melt(
         cleaned_daily_trade_prices_df, 
@@ -207,8 +213,14 @@ def integrate_datasets_task(**context):
     
     # Drop unnecessary date columns from joins
     merged_df = merged_df.drop(columns=['date_x', 'date_y'], errors='ignore')
-    
     logger.info(f"Integration complete: {len(merged_df)} rows, {len(merged_df.columns)} columns")
+
+    # reverse the log transformation of stock_price
+    merged_df.loc[merged_df['stock_ticker'] == 'STK001', 'stock_price'] = np.expm1(merged_df.loc[merged_df['stock_ticker'] == 'STK001', 'stock_price'])
+    # reverse the zscore transformation of average_trade_size
+    merged_df['average_trade_size'] = (merged_df['average_trade_size'] * avg_trade_size_std) + avg_trade_size_mean
+    logger.info("Reversed transformations of stock_price and average_trade_size")
+    logger.info(f"Average trade size - Mean: {merged_df['average_trade_size'].mean():.4f}, Std: {merged_df['average_trade_size'].std():.4f}")
     
     # Save integrated data
     os.makedirs(OUTPUT_DIR, exist_ok=True)
